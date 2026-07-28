@@ -192,6 +192,42 @@ async function stopCapture(options) {
 
 
 /**
+ * Se ejecuta cuando el usuario clickea el ícono de la extensión.
+ * En vez de abrir un popup, abre (o enfoca si ya está abierta) la pestaña
+ * de options.html, que ahora es la puerta de entrada de la extensión.
+ */
+chrome.action.onClicked.addListener(async (clickedTab) => {
+  // Guardamos qué pestaña estaba activa cuando clickeaste el ícono.
+  // Por ahora la usamos como "la pestaña a capturar" (más adelante
+  // esto lo va a reemplazar el selector de pestañas).
+  await setLocalStorageValue("currentTabId", clickedTab.id);
+
+  const existingOptionTabId = await getLocalStorageValue("optionTabId");
+
+  if (existingOptionTabId) {
+    try {
+      // Si la ventana de options ya existe, la enfocamos en vez de abrir otra.
+      const optionTab = await getTab(existingOptionTabId);
+      await chrome.windows.update(optionTab.windowId, { focused: true });
+      return;
+    } catch (error) {
+      // La pestaña guardada ya no existe (la cerraron) -> seguimos y abrimos una nueva.
+    }
+  }
+
+  const newWindow = await chrome.windows.create({
+    url: `chrome-extension://${chrome.runtime.id}/options.html`,
+    type: "popup",
+    width: 480,
+    height: 720,
+    focused: true,
+  });
+  const optionTab = newWindow.tabs[0];
+  await setLocalStorageValue("optionTabId", optionTab.id);
+});
+
+
+/**
  * Listens for messages from the runtime and performs corresponding actions.
  * @param {Object} message - The message received from the runtime.
  */
@@ -218,18 +254,5 @@ chrome.runtime.onMessage.addListener(async (message, sender) => {
     });
 
     console.log("Transcript registered:", transcriptTabId);
-  } else if (message.type === "transcript") {
-    console.log("BACKGROUND RECIBIO:", message.data);
-    
-    const result = await chrome.storage.local.get("transcriptTabId");
-
-    if (result.transcriptTabId) {
-      chrome.runtime.sendMessage({
-        type: "transcript",
-        text: message.data,
-    });
-    }
   }
 });
-
-
