@@ -141,7 +141,16 @@ class ServeClientBase(object):
 
     def handle_transcription_output(self, result, duration):
         raise NotImplementedError
-    
+
+    def on_segment_finalized(self):
+        """
+        Se llama cada vez que un segmento queda definitivo y el buffer arranca
+        una frase nueva (self.timestamp_offset avanza). Por defecto no hace nada;
+        cada backend lo puede sobreescribir (por ejemplo, para "olvidar" el idioma
+        detectado y que la frase nueva se detecte de cero).
+        """
+        pass
+
     def format_segment(self, start, end, text, completed=False, speaker=None, words=None):
         """
         Formats a transcription segment with precise start and end times alongside the transcribed text.
@@ -478,6 +487,7 @@ class ServeClientBase(object):
         if offset is not None:
             with self.lock:
                 self.timestamp_offset += offset
+            self.on_segment_finalized()
 
         self._trim_transcript()
         return last_segment

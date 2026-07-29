@@ -80,9 +80,16 @@ class ServeClientFasterWhisper(ServeClientBase):
 
         self.model_size_or_path = model
         self.language = "en" if self.model_size_or_path.endswith("en") else language
+        # Idioma que pidió el cliente (None = auto-detect). Nunca se pisa.
+        self.language_requested = self.language
+        # Idioma detectado para la FRASE actual (el buffer desde el último
+        # reset). Se resetea a None cada vez que arranca una frase nueva
+        # (ver on_segment_finalized), así no queda pegado a un idioma viejo,
+        # pero tampoco se re-detecta en cada chunk parcial de la misma frase.
+        self.utterance_language = None
         self.task = task
         self.initial_prompt = initial_prompt
-        self.vad_parameters = vad_parameters or {"threshold": 0.5}
+        self.vad_parameters = vad_parameters or {"threshold": 0.3}
         self.hotwords = hotwords
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -193,6 +200,15 @@ class ServeClientFasterWhisper(ServeClientBase):
             self.websocket.send(json.dumps(
                 {"uid": self.client_uid, "language": self.language, "language_prob": info.language_probability}))
 
+    def on_segment_finalized(self):
+        """
+        Arrancó una frase nueva (el buffer avanzó). Si el cliente pidió
+        auto-detect, olvidamos el idioma detectado de la frase anterior
+        para que la frase nueva se detecte de cero.
+        """
+        if self.language_requested is None:
+            self.utterance_language = None
+
     def transcribe_audio(self, input_sample):
         """
         Transcribes the provided audio sample using the configured transcriber instance.
@@ -209,12 +225,23 @@ class ServeClientFasterWhisper(ServeClientBase):
             depends on the implementation of the `transcriber.transcribe` method but typically
             includes the transcribed text.
         """
+        # Si el cliente pidió un idioma fijo, se usa siempre ese.
+        # Si pidió auto-detect (language_requested is None), usamos el
+        # idioma ya detectado para ESTA frase si lo tenemos; si la frase
+        # recién arranca (utterance_language todavía en None), mandamos
+        # None para que faster-whisper lo detecte de cero.
+        lang_for_transcribe = (
+            self.language_requested
+            if self.language_requested is not None
+            else self.utterance_language
+        )
+
         # Batch inference path: submit to central queue and wait
         if ServeClientFasterWhisper.BATCH_WORKER is not None:
             from whisper_live.batch_inference import BatchRequest
             request = BatchRequest(
                 audio=input_sample,
-                language=self.language,
+                language=lang_for_transcribe,
                 task=self.task,
                 initial_prompt=self.initial_prompt,
                 use_vad=self.use_vad,
@@ -226,6 +253,8 @@ class ServeClientFasterWhisper(ServeClientBase):
             request.future.wait(timeout=30)
             if request.error:
                 raise request.error
+            if self.language_requested is None and self.utterance_language is None and request.info is not None:
+                self.utterance_language = request.info.language
             if self.language is None and request.info is not None:
                 self.set_language(request.info)
             return request.result
@@ -236,7 +265,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         result, info = self.transcriber.transcribe(
             input_sample,
             initial_prompt=self.initial_prompt,
-            language=self.language,
+            language=lang_for_transcribe,
             task=self.task,
             vad_filter=self.use_vad,
             vad_parameters=self.vad_parameters if self.use_vad else None,
@@ -244,6 +273,9 @@ class ServeClientFasterWhisper(ServeClientBase):
             word_timestamps=self.word_timestamps)
         if ServeClientFasterWhisper.SINGLE_MODEL:
             ServeClientFasterWhisper.SINGLE_MODEL_LOCK.release()
+
+        if self.language_requested is None and self.utterance_language is None and info is not None:
+            self.utterance_language = info.language
 
         if self.language is None and info is not None:
             self.set_language(info)

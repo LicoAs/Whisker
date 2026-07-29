@@ -1,230 +1,171 @@
-/**
- * Captures audio from the active tab in Google Chrome.
- * @returns {Promise<MediaStream>} A promise that resolves with the captured audio stream.
- */
-function captureTabAudio() {
-  return new Promise((resolve) => {
-    chrome.tabCapture.capture(
-      {
-        audio: true,
-        video: false,
-      },
-      (stream) => {
-        resolve(stream);
+// chrome.tabCapture.getMediaStreamId SOLO se puede llamar desde acá
+// (una página normal de la extensión), no desde el offscreen document.
+// Por eso este pedacito se queda en options.js.
+function getStreamIdForTab(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (streamId) => {
+      if (chrome.runtime.lastError || !streamId) {
+        reject(chrome.runtime.lastError || new Error("No se pudo obtener streamId"));
+        return;
       }
-    );
-  });
-}
-
-
-/**
- * Sends a message to a specific tab in Google Chrome.
- * @param {number} tabId - The ID of the tab to send the message to.
- * @param {any} data - The data to be sent as the message.
- * @returns {Promise<any>} A promise that resolves with the response from the tab.
- */
-function sendMessageToTab(tabId, data) {
-  return new Promise((resolve) => {
-    chrome.tabs.sendMessage(tabId, data, (response) => {
-      resolve(response);
+      resolve(streamId);
     });
   });
 }
 
-function generateUUID() {
-  let dt = new Date().getTime();
-  const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = (dt + Math.random() * 16) % 16 | 0;
-    dt = Math.floor(dt / 16);
-    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-  });
-  return uuid;
+function setServerStatus(text, color = "gray") {
+  const statusEl = document.getElementById("serverStatus");
+  const dotEl = document.getElementById("statusDot");
+  if (statusEl) statusEl.lastChild.textContent = " Estado: " + text;
+  if (dotEl) dotEl.className = "status-dot " + color;
 }
 
-// Global variables for audio processing
-let audioContext = null;
-let preNode = null;
-let socket = null;
-let isServerReady = false;
-let currentStream = null;
-let currentOptions = null;
+function updateTargetTabInfo(tabId) {
+  const infoEl = document.getElementById("targetTabInfo");
+  if (!infoEl) return;
 
-// AudioWorklet URL - make sure this path matches your manifest.json
-const WORKLET_URL = chrome.runtime.getURL('audiopreprocessor.js');
-
-async function initAudioWorklet(stream) {
-  audioContext = new AudioContext();
-  if (audioContext.state === 'suspended') {
-    await audioContext.resume();
+  if (!tabId) {
+    infoEl.textContent = "Vas a capturar: (ninguna pestaña seleccionada)";
+    return;
   }
 
-  try {
-    await audioContext.audioWorklet.addModule(WORKLET_URL);
-    preNode = new AudioWorkletNode(audioContext, 'audiopreprocessor');
-    const mediaStream = audioContext.createMediaStreamSource(stream);
-    
-    mediaStream.connect(preNode);
-    preNode.connect(audioContext.destination);
-    preNode.port.onmessage = (event) => {
-      const data = event.data;
-      
-      
-      const audio16k = data; // Float32Array @ 16 kHz
-      
-      if (socket && socket.readyState === WebSocket.OPEN && isServerReady) {
-        socket.send(audio16k);
-      }
-    };
-        
-    // Test if we can hear audio (this will help verify the audio path)
-    
-  } catch (error) {
-    console.error("Error initializing AudioWorklet:", error);
-    throw error;
-  }
-}
-
-function cleanupAudio() {
-  
-  if (preNode) {
-    preNode.port.onmessage = null;
-    preNode.disconnect();
-    preNode = null;
-  }
-  
-  if (audioContext) {
-    audioContext.close();
-    audioContext = null;
-  }
-
-  if (currentStream) {
-    currentStream.getTracks().forEach(track => {
-      track.stop();
-      console.log("Stopped track:", track.kind);
-    });
-    currentStream = null;
-  }
-}
-
-/**
- * Starts recording audio from the captured tab.
- * @param {Object} option - The options object containing the currentTabId.
- */
-async function startRecord(option) {
-  currentOptions = option;
-  const stream = await captureTabAudio();
-  const uuid = generateUUID();
-
-  if (stream) {
-    currentStream = stream;
-    stream.oninactive = () => {
-      cleanupAudio();
-      window.close();
-    };
-
-    try {
-      await initAudioWorklet(stream);
-    } catch (error) {
-      console.error("Failed to initialize AudioWorklet:", error);
+  chrome.tabs.get(tabId, (tab) => {
+    if (chrome.runtime.lastError || !tab) {
+      infoEl.textContent = "Vas a capturar: (la pestaña ya no está disponible)";
       return;
     }
-
-    const wsUrl = option.port
-      ? `ws://${option.host}:${option.port}/`
-      : `wss://${option.host}/ws`;
-    socket = new WebSocket(wsUrl);
-    isServerReady = false;
-    let language = option.language;
-
-    socket.onopen = function(e) {
-      socket.send(
-        JSON.stringify({
-          uid: uuid,
-          language: option.language,
-          task: option.task,
-          model: option.modelSize,
-          use_vad: option.useVad
-        })
-      );
-    };
-
-    socket.onmessage = async (event) => {
-      const data = JSON.parse(event.data);
-      if (data["uid"] !== uuid)
-        return;
-      
-      if (data["status"] === "WAIT"){
-        await sendMessageToTab(option.currentTabId, {
-          type: "showWaitPopup",
-          data: data["message"],
-        });
-        chrome.runtime.sendMessage({ action: "toggleCaptureButtons", data: false }) 
-        chrome.runtime.sendMessage({ action: "stopCapture" })
-        return;
-      }
-        
-      if (isServerReady === false){
-        isServerReady = true;
-        return;
-      }
-      
-      if (language === null) {
-        language = data["language"];
-        
-        // send message to popup.js to update dropdown
-        chrome.runtime.sendMessage({
-          action: "updateSelectedLanguage",
-          detectedLanguage: language,
-        });
-
-        return;
-      }
-
-      if (data["message"] === "DISCONNECT"){
-        chrome.runtime.sendMessage({ action: "toggleCaptureButtons", data: false, saveCaptions: option.saveCaptions });        
-        return;
-      }
-
-      const res = await sendMessageToTab(option.currentTabId, {
-        type: "transcript",
-        data: {
-          data: event.data,
-          saveCaptions: option.saveCaptions,
-        },
-      });
-    };
-
-    socket.onclose = () => {
-      cleanupAudio();
-    };
-
-    socket.onerror = (error) => {
-      cleanupAudio();
-    };
-
-  } else {
-    window.close();
-  }
+    infoEl.textContent = "Vas a capturar: " + tab.title;
+  });
 }
 
+function toggleCaptureButtons(isCapturing) {
+  const startButton = document.getElementById("startCapture");
+  const stopButton = document.getElementById("stopCapture");
+  const useServerCheckbox = document.getElementById("useServerCheckbox");
+  const useVadCheckbox = document.getElementById("useVadCheckbox");
+  const languageDropdown = document.getElementById("languageDropdown");
+  const taskDropdown = document.getElementById("taskDropdown");
+  const modelSizeDropdown = document.getElementById("modelSizeDropdown");
 
-/**
- * Listener for incoming messages from the extension's background script.
- * @param {Object} request - The message request object.
- * @param {Object} sender - The sender object containing information about the message sender.
- * @param {Function} sendResponse - The function to send a response back to the message sender.
- */
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  const { type, data } = request;
+  startButton.disabled = isCapturing;
+  stopButton.disabled = !isCapturing;
+  useServerCheckbox.disabled = isCapturing;
+  useVadCheckbox.disabled = isCapturing;
+  modelSizeDropdown.disabled = isCapturing;
+  languageDropdown.disabled = isCapturing;
+  taskDropdown.disabled = isCapturing;
+  startButton.classList.toggle("disabled", isCapturing);
+  stopButton.classList.toggle("disabled", !isCapturing);
+}
 
-  switch (type) {
-    case "start_capture":
-      startRecord(data);
-      break;
-    default:
-      break;
+// Mensajes que llegan desde offscreen.js (a través del runtime, sin pasar
+// por background.js) para actualizar la UI.
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.type === "status-update") {
+    setServerStatus(message.text, message.color);
+  } else if (message.type === "capture-stopped") {
+    toggleCaptureButtons(false);
   }
+});
 
-  sendResponse({});
-  return true;
+document.addEventListener("DOMContentLoaded", function () {
+  const startButton = document.getElementById("startCapture");
+  const stopButton = document.getElementById("stopCapture");
+  const useServerCheckbox = document.getElementById("useServerCheckbox");
+  const useVadCheckbox = document.getElementById("useVadCheckbox");
+  const languageDropdown = document.getElementById("languageDropdown");
+  const taskDropdown = document.getElementById("taskDropdown");
+  const modelSizeDropdown = document.getElementById("modelSizeDropdown");
+
+  // Mostrar qué pestaña quedó armada
+  chrome.storage.local.get("currentTabId", ({ currentTabId }) => {
+    updateTargetTabInfo(currentTabId);
+  });
+
+  // Si clickeás el ícono en otra pestaña mientras options.html sigue abierta,
+  // actualizamos el cartel sin que haga falta recargar.
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === "local" && changes.currentTabId) {
+      updateTargetTabInfo(changes.currentTabId.newValue);
+    }
+  });
+
+  // Restaurar preferencias guardadas
+  chrome.storage.local.get(
+    ["useServerState", "useVadState", "selectedLanguage", "selectedTask", "selectedModelSize"],
+    (result) => {
+      if (result.useServerState !== undefined) useServerCheckbox.checked = result.useServerState;
+      if (result.useVadState !== undefined) useVadCheckbox.checked = result.useVadState;
+      if (result.selectedLanguage !== undefined) languageDropdown.value = result.selectedLanguage;
+      if (result.selectedTask !== undefined) taskDropdown.value = result.selectedTask;
+      if (result.selectedModelSize !== undefined) modelSizeDropdown.value = result.selectedModelSize;
+    }
+  );
+
+  useServerCheckbox.addEventListener("change", () => {
+    chrome.storage.local.set({ useServerState: useServerCheckbox.checked });
+  });
+  useVadCheckbox.addEventListener("change", () => {
+    chrome.storage.local.set({ useVadState: useVadCheckbox.checked });
+  });
+  languageDropdown.addEventListener("change", () => {
+    chrome.storage.local.set({ selectedLanguage: languageDropdown.value || null });
+  });
+  taskDropdown.addEventListener("change", () => {
+    chrome.storage.local.set({ selectedTask: taskDropdown.value });
+  });
+  modelSizeDropdown.addEventListener("change", () => {
+    chrome.storage.local.set({ selectedModelSize: modelSizeDropdown.value });
+  });
+
+  startButton.addEventListener("click", async () => {
+    if (startButton.disabled) return;
+
+    chrome.storage.local.get("currentTabId", async ({ currentTabId }) => {
+      if (!currentTabId) {
+        setServerStatus("no se detectó pestaña a capturar", "red");
+        return;
+      }
+
+      let host = "localhost";
+      let port = "9090";
+      if (useServerCheckbox.checked) {
+        host = "boxerab--aavaaz-live-livetranscriber-web.modal.run";
+        port = "";
+      }
+
+      toggleCaptureButtons(true);
+      setServerStatus("conectando...", "yellow");
+
+      let streamId;
+      try {
+        streamId = await getStreamIdForTab(currentTabId);
+      } catch (error) {
+        console.error("No se pudo obtener el streamId:", error);
+        setServerStatus("error al capturar audio", "red");
+        toggleCaptureButtons(false);
+        return;
+      }
+
+      // Ya no capturamos acá: le pedimos al offscreen document que arranque,
+      // pasándole el streamId ya obtenido.
+      chrome.runtime.sendMessage({
+        type: "offscreen-start",
+        data: {
+          streamId,
+          host,
+          port,
+          language: languageDropdown.value || null,
+          task: taskDropdown.value,
+          modelSize: modelSizeDropdown.value,
+          useVad: useVadCheckbox.checked,
+        },
+      });
+    });
+  });
+
+  stopButton.addEventListener("click", () => {
+    if (stopButton.disabled) return;
+    chrome.runtime.sendMessage({ type: "offscreen-stop" });
+  });
 });

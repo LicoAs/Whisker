@@ -3,6 +3,8 @@
  * @param {number} tabId - The ID of the tab to be removed.
  * @returns {Promise<void>} A promise that resolves when the tab is successfully removed or fails to remove.
  */
+let transcriptTabId = null;
+
 function removeChromeTab(tabId) {
   return new Promise((resolve) => {
     chrome.tabs.remove(tabId)
@@ -125,6 +127,31 @@ async function getTab(tabId) {
 
 
 /**
+ * Crea el offscreen document si todavía no existe.
+ * Es idempotente: si lo llamás dos veces, no rompe nada.
+ */
+async function ensureOffscreenDocument() {
+  const existingContexts = await chrome.runtime.getContexts({
+    contextTypes: ["OFFSCREEN_DOCUMENT"],
+  });
+
+  if (existingContexts.length > 0) {
+    console.log("Offscreen document ya existe, no creo otro.");
+    return;
+  }
+
+  await chrome.offscreen.createDocument({
+    url: "offscreen.html",
+    reasons: ["USER_MEDIA"],
+    justification: "Captura y envío continuo de audio para transcripción, sin depender de que una pestaña esté visible.",
+  });
+
+  console.log("Offscreen document creado.");
+}
+
+
+
+/**
  * Starts the capture process for the specified tab.
  * @param {number} tabId - The ID of the tab to start capturing.
  * @returns {Promise<void>} - A Promise that resolves when the capture process is started successfully.
@@ -190,10 +217,46 @@ async function stopCapture(options) {
 
 
 /**
+ * Se ejecuta cuando el usuario clickea el ícono de la extensión.
+ * En vez de abrir un popup, abre (o enfoca si ya está abierta) la pestaña
+ * de options.html, que ahora es la puerta de entrada de la extensión.
+ */
+chrome.action.onClicked.addListener(async (clickedTab) => {
+  // Guardamos qué pestaña estaba activa cuando clickeaste el ícono.
+  // Por ahora la usamos como "la pestaña a capturar" (más adelante
+  // esto lo va a reemplazar el selector de pestañas).
+  await setLocalStorageValue("currentTabId", clickedTab.id);
+
+  const existingOptionTabId = await getLocalStorageValue("optionTabId");
+
+  if (existingOptionTabId) {
+    try {
+      // Si la ventana de options ya existe, la enfocamos en vez de abrir otra.
+      const optionTab = await getTab(existingOptionTabId);
+      await chrome.windows.update(optionTab.windowId, { focused: true });
+      return;
+    } catch (error) {
+      // La pestaña guardada ya no existe (la cerraron) -> seguimos y abrimos una nueva.
+    }
+  }
+    await ensureOffscreenDocument();
+  const newWindow = await chrome.windows.create({
+    url: `chrome-extension://${chrome.runtime.id}/options.html`,
+    type: "popup",
+    width: 480,
+    height: 720,
+    focused: true,
+  });
+  const optionTab = newWindow.tabs[0];
+  await setLocalStorageValue("optionTabId", optionTab.id);
+});
+
+
+/**
  * Listens for messages from the runtime and performs corresponding actions.
  * @param {Object} message - The message received from the runtime.
  */
-chrome.runtime.onMessage.addListener(async (message) => {
+chrome.runtime.onMessage.addListener(async (message, sender) => {
   if (message.action === "startCapture") {
     startCapture(message);
   } else if (message.action === "stopCapture") {
@@ -206,7 +269,21 @@ chrome.runtime.onMessage.addListener(async (message) => {
     chrome.runtime.sendMessage({ action: "toggleCaptureButtons", data: false });
     chrome.storage.local.set({ capturingState: { isCapturing: false } })
     stopCapture({saveCaptions: message.saveCaptions});
+  } else if (message.type === "open-transcript-tab") {
+    chrome.tabs.create({
+      url: `chrome-extension://${chrome.runtime.id}/transcript.html`,
+      pinned: true,
+      active: false,
+    });  
+  } else if (message.type === "openTranscript") {
+    transcriptTabId = message.tabId;
+  } else if (message.type === "registerTranscript") {
+    transcriptTabId = sender.tab.id;
+
+    await chrome.storage.local.set({
+        transcriptTabId: transcriptTabId
+    });
+
+    console.log("Transcript registered:", transcriptTabId);
   }
 });
-
-

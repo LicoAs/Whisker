@@ -1,111 +1,171 @@
+:root {
+  --bg: #f6f5f2;
+  --surface: #ffffff;
+  --border: #e2e0da;
+  --ink: #23262b;
+  --ink-soft: #6b6f76;
+  --accent: #0f766e;
+  --accent-soft: #e6f2f1;
+  --danger: #dc4c3f;
+  --font-ui: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-ui);
+  background: var(--bg);
+  color: var(--ink);
+  margin: 0;
+  padding: 24px 32px 48px;
+  max-width: 640px;
+}
+
 .header {
   display: flex;
   align-items: center;
-  padding-bottom: 15px;
-  padding-left: 20px;
-  border-bottom: 2px solid darkred;
-}
-
-.header-title {
-  padding: 0 5px;
-}
-
-h1 {
-  font-size: 36px;
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
 }
 
 img {
-  height: 64px;
-  margin: 0 20px 0 0;
+  height: 44px;
+  margin: 0 14px 0 0;
+}
+
+h1 {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0;
 }
 
 h2 {
-  font-size: 26px;
+  font-size: 18px;
+  font-weight: 600;
 }
 
 label {
-  font-size: 16px;
+  font-size: 14px;
+  color: var(--ink-soft);
 }
 
-.inner {
-  margin-left: 40px;
+/* --- Estado y pestaña armada --- */
+
+.status-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  margin-bottom: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 14px;
+  color: var(--ink-soft);
 }
 
-.options-list {
-  padding: 0;
-  list-style: none;
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #b9b9b9;
+  flex-shrink: 0;
+  transition: background-color 0.2s ease;
 }
 
-.options-list li {
-  padding: 10px;
+.status-dot.green {
+  background-color: #2e9e6c;
+  box-shadow: 0 0 0 3px rgba(46, 158, 108, 0.15);
 }
 
-.time {
-  font-size: 16px;
+.status-dot.red {
+  background-color: var(--danger);
+  box-shadow: 0 0 0 3px rgba(220, 76, 63, 0.15);
 }
 
-.limit {
-  display: inline-block;
-  margin: 0;
-  font-size: 12px;
+.status-dot.yellow {
+  background-color: #d0980f;
+  box-shadow: 0 0 0 3px rgba(208, 152, 15, 0.15);
 }
 
-.radioChoice {
-  margin-left: 15px;
-}
+/* --- Botones --- */
 
 .button-container {
   display: flex;
-  justify-content: space-between;
-  padding: 10px;
+  gap: 10px;
+  padding: 4px 0 20px;
 }
 
 .button {
-  padding: 10px;
-  border: 2px solid darkred;
-  font-size: 16px;
-  font-weight: bold;
+  flex: 1;
+  text-align: center;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 15px;
+  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
-  width: 150px;
-  border-radius: 5px;
+  border-radius: 8px;
+  transition: all 0.15s ease;
+}
+
+#startCapture {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+#startCapture:hover:not(:disabled):not(.disabled) {
+  background: #0c5f58;
+}
+
+#stopCapture:hover:not(:disabled):not(.disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .disabled {
-  opacity: 0.6;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
-.button:hover:not(:disabled) {
-  color: red;
-  background-color: darkred;
-}
+/* --- Checkboxes y dropdowns --- */
 
-#save {
-  font-size: 16px;
-  margin-left: 50px;
-}
-
-#status {
-  color: red;
-  margin-top: 8px;
-  margin-left: 50px;
-  font-size: 14px;
-}
-
-#qualityLi {
-  display: none;
-}
-
-#maxTime {
-  width: 30px;
-  text-align: center;
-}
-
-.checkbox-container {
-  padding: 10px; 
+.checkbox-container,
+.dropdown-container {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .dropdown-container {
-  padding: 10px; 
+  justify-content: space-between;
+}
+
+.dropdown-container label {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+select {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
 }
