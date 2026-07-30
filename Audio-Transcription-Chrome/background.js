@@ -300,10 +300,12 @@ chrome.runtime.onMessage.addListener(async (message, sender) => {
     // (o "transcribe") abre la vista estándar de siempre.
     const selectedTask = await getLocalStorageValue("selectedTask");
     const page = selectedTask === "translate" ? "translate.html" : "transcript.html";
-    chrome.tabs.create({
+    chrome.windows.create({
       url: `chrome-extension://${chrome.runtime.id}/${page}`,
-      pinned: true,
-      active: false,
+      type: "popup",
+      width: 700,
+      height: 500,
+      focused: true,
     });
   } else if (message.type === "capturing-state") {
     await setLocalStorageValue("isCapturing", message.isCapturing);
