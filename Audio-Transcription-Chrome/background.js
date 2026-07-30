@@ -299,7 +299,12 @@ chrome.runtime.onMessage.addListener(async (message, sender) => {
     // "translate" abre la vista de traducción, cualquier otra cosa
     // (o "transcribe") abre la vista estándar de siempre.
     const selectedTask = await getLocalStorageValue("selectedTask");
-    const page = selectedTask === "translate" ? "translate.html" : "transcript.html";
+    let page = "transcript.html";
+    if (selectedTask === "translate") {
+      page = "translate.html";
+    } else if (selectedTask === "interpreter") {
+      page = "interpreter.html";
+    }
     chrome.windows.create({
       url: `chrome-extension://${chrome.runtime.id}/${page}`,
       type: "popup",

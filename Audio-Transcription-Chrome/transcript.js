@@ -24,7 +24,6 @@ chrome.runtime.onMessage.addListener((message) => {
         current.textContent = "";
 
         for (const seg of data.segments) {
-
             if (seg.completed) {
 
     const end = parseFloat(seg.end);

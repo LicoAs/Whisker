@@ -209,6 +209,9 @@ class ServeClientFasterWhisper(ServeClientBase):
         if self.language_requested is None:
             self.utterance_language = None
 
+    def get_segment_language(self):
+        return self.language_requested if self.language_requested is not None else self.utterance_language        
+
     def transcribe_audio(self, input_sample):
         """
         Transcribes the provided audio sample using the configured transcriber instance.

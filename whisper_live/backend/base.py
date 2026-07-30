@@ -151,7 +151,7 @@ class ServeClientBase(object):
         """
         pass
 
-    def format_segment(self, start, end, text, completed=False, speaker=None, words=None):
+    def format_segment(self, start, end, text, completed=False, speaker=None, words=None, language=None):
         """
         Formats a transcription segment with precise start and end times alongside the transcribed text.
 
@@ -177,6 +177,8 @@ class ServeClientBase(object):
             seg['speaker'] = speaker
         if words is not None:
             seg['words'] = words
+        if language is not None:
+            seg['language'] = language    
         return seg
 
     def add_frames(self, frame_np):
@@ -420,7 +422,7 @@ class ServeClientBase(object):
                     continue
                 speaker = self._identify_speaker(s)
                 words = self._extract_words(s, self.timestamp_offset)
-                completed_segment = self.format_segment(start, end, text_, completed=True, speaker=speaker, words=words)
+                completed_segment = self.format_segment(start, end, text_, completed=True, speaker=speaker, words=words, language=self.get_segment_language())
                 self.transcript.append(completed_segment)
 
                 if self.translation_queue:
@@ -440,7 +442,8 @@ class ServeClientBase(object):
                     self.timestamp_offset + min(duration, self.get_segment_end(segments[-1])),
                     self.current_out,
                     completed=False,
-                    words=words
+                    words=words,
+                    language=self.get_segment_language()
                 )
 
         # Handle repeated output logic.
@@ -466,7 +469,8 @@ class ServeClientBase(object):
                         self.timestamp_offset,
                         self.timestamp_offset + min(duration, self.end_time_for_same_output),
                         self.current_out,
-                        completed=True
+                        completed=True,
+                        language=self.get_segment_language()
                     )
                     self.transcript.append(completed_segment)
 
@@ -491,6 +495,14 @@ class ServeClientBase(object):
 
         self._trim_transcript()
         return last_segment
+
+    def get_segment_language(self):
+        """
+        Idioma a adjuntar a cada segmento formateado. Por defecto None
+        (no se manda idioma). Los backends que detectan idioma por frase
+        lo sobreescriben.
+        """
+        return None
 
     def _trim_transcript(self):
         """Trims transcript and text lists to prevent unbounded memory growth."""

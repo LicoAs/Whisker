@@ -99,6 +99,8 @@ function toggleCaptureButtons(isCapturing) {
   const modelSizeDropdown = document.getElementById("modelSizeDropdown");
   const sourceTabDropdown = document.getElementById("sourceTabDropdown");
   const refreshTabsButton = document.getElementById("refreshTabsButton");
+  const columnLangLeftDropdown = document.getElementById("columnLangLeftDropdown");
+  const columnLangRightDropdown = document.getElementById("columnLangRightDropdown");
 
   startButton.disabled = isCapturing;
   stopButton.disabled = !isCapturing;
@@ -110,6 +112,8 @@ function toggleCaptureButtons(isCapturing) {
   refreshTabsButton.disabled = isCapturing;
   startButton.classList.toggle("disabled", isCapturing);
   stopButton.classList.toggle("disabled", !isCapturing);
+  columnLangLeftDropdown.disabled = isCapturing;
+  columnLangRightDropdown.disabled = isCapturing;
 }
 
 // Mensajes que llegan desde offscreen.js (a través del runtime, sin pasar
@@ -130,6 +134,8 @@ document.addEventListener("DOMContentLoaded", function () {
   const taskDropdown = document.getElementById("taskDropdown");
   const modelSizeDropdown = document.getElementById("modelSizeDropdown");
   const sourceTabDropdown = document.getElementById("sourceTabDropdown");
+  const columnLangLeftDropdown = document.getElementById("columnLangLeftDropdown");
+  const columnLangRightDropdown = document.getElementById("columnLangRightDropdown");
 
   // Mostrar qué fuente quedó armada, y poblar el selector
   chrome.storage.local.get(["sourceType", "currentTabId"], ({ sourceType, currentTabId }) => {
@@ -169,12 +175,14 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // Restaurar preferencias guardadas
   chrome.storage.local.get(
-    ["useVadState", "selectedLanguage", "selectedTask", "selectedModelSize"],
+    ["useVadState", "selectedLanguage", "selectedTask", "selectedModelSize", "columnLangLeft", "columnLangRight"],
     (result) => {
       if (result.useVadState !== undefined) useVadCheckbox.checked = result.useVadState;
       if (result.selectedLanguage !== undefined) languageDropdown.value = result.selectedLanguage || "";
       if (result.selectedTask !== undefined) taskDropdown.value = result.selectedTask;
       if (result.selectedModelSize !== undefined) modelSizeDropdown.value = result.selectedModelSize;
+      if (result.columnLangLeft !== undefined) columnLangLeftDropdown.value = result.columnLangLeft;
+      if (result.columnLangRight !== undefined) columnLangRightDropdown.value = result.columnLangRight;
     }
   );
 
@@ -190,6 +198,12 @@ document.addEventListener("DOMContentLoaded", function () {
   modelSizeDropdown.addEventListener("change", () => {
     chrome.storage.local.set({ selectedModelSize: modelSizeDropdown.value });
   });
+  columnLangLeftDropdown.addEventListener("change", () => {
+    chrome.storage.local.set({ columnLangLeft: columnLangLeftDropdown.value });
+  });
+  columnLangRightDropdown.addEventListener("change", () => {
+    chrome.storage.local.set({ columnLangRight: columnLangRightDropdown.value });
+  });
 
   startButton.addEventListener("click", async () => {
     if (startButton.disabled) return;
@@ -201,7 +215,7 @@ document.addEventListener("DOMContentLoaded", function () {
       host,
       port,
       language: languageDropdown.value || null,
-      task: taskDropdown.value,
+      task: taskDropdown.value === "interpreter" ? "transcribe" : taskDropdown.value,
       modelSize: modelSizeDropdown.value,
       useVad: useVadCheckbox.checked,
     };
