@@ -13,6 +13,8 @@ function getStreamIdForTab(tabId) {
   });
 }
 
+const SYSTEM_AUDIO_VALUE = "__system_audio__";
+
 function setServerStatus(text, color = "gray") {
   const statusEl = document.getElementById("serverStatus");
   const dotEl = document.getElementById("statusDot");
@@ -20,9 +22,17 @@ function setServerStatus(text, color = "gray") {
   if (dotEl) dotEl.className = "status-dot " + color;
 }
 
-function updateTargetTabInfo(tabId) {
+/**
+ * Actualiza el cartel "Vas a capturar: ...". sourceType es "tab" o "desktop".
+ */
+function updateTargetTabInfo(sourceType, tabId) {
   const infoEl = document.getElementById("targetTabInfo");
   if (!infoEl) return;
+
+  if (sourceType === "desktop") {
+    infoEl.textContent = "Vas a capturar: todo el audio del sistema";
+    return;
+  }
 
   if (!tabId) {
     infoEl.textContent = "Vas a capturar: (ninguna pestaña seleccionada)";
@@ -38,22 +48,66 @@ function updateTargetTabInfo(tabId) {
   });
 }
 
+/**
+ * Llena el dropdown de fuente: primero la opción de "todo el audio del
+ * sistema", después las pestañas abiertas actualmente. No lista las
+ * páginas propias de la extensión (options.html, transcript.html, etc).
+ */
+function populateSourceTabDropdown(sourceType, selectedTabId) {
+  const dropdown = document.getElementById("sourceTabDropdown");
+  if (!dropdown) return;
+
+  chrome.tabs.query({}, (tabs) => {
+    dropdown.innerHTML = "";
+
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    emptyOption.textContent = "-- Elegí una fuente --";
+    dropdown.appendChild(emptyOption);
+
+    const systemAudioOption = document.createElement("option");
+    systemAudioOption.value = SYSTEM_AUDIO_VALUE;
+    systemAudioOption.textContent = "🖥️ Todo el audio del sistema";
+    if (sourceType === "desktop") {
+      systemAudioOption.selected = true;
+    }
+    dropdown.appendChild(systemAudioOption);
+
+    const ownPrefix = `chrome-extension://${chrome.runtime.id}`;
+
+    tabs.forEach((tab) => {
+      if (tab.url && tab.url.startsWith(ownPrefix)) return;
+
+      const option = document.createElement("option");
+      option.value = String(tab.id);
+      const audibleTag = tab.audible ? "🔊 " : "";
+      option.textContent = audibleTag + (tab.title || tab.url || "(sin título)");
+      if (sourceType === "tab" && selectedTabId && tab.id === selectedTabId) {
+        option.selected = true;
+      }
+      dropdown.appendChild(option);
+    });
+  });
+}
+
 function toggleCaptureButtons(isCapturing) {
   const startButton = document.getElementById("startCapture");
   const stopButton = document.getElementById("stopCapture");
-  const useServerCheckbox = document.getElementById("useServerCheckbox");
   const useVadCheckbox = document.getElementById("useVadCheckbox");
   const languageDropdown = document.getElementById("languageDropdown");
   const taskDropdown = document.getElementById("taskDropdown");
   const modelSizeDropdown = document.getElementById("modelSizeDropdown");
+  const sourceTabDropdown = document.getElementById("sourceTabDropdown");
+  const refreshTabsButton = document.getElementById("refreshTabsButton");
 
   startButton.disabled = isCapturing;
   stopButton.disabled = !isCapturing;
-  useServerCheckbox.disabled = isCapturing;
   useVadCheckbox.disabled = isCapturing;
   modelSizeDropdown.disabled = isCapturing;
   languageDropdown.disabled = isCapturing;
   taskDropdown.disabled = isCapturing;
+  sourceTabDropdown.disabled = isCapturing;
+  refreshTabsButton.disabled = isCapturing;
   startButton.classList.toggle("disabled", isCapturing);
   stopButton.classList.toggle("disabled", !isCapturing);
 }
@@ -71,40 +125,59 @@ chrome.runtime.onMessage.addListener((message) => {
 document.addEventListener("DOMContentLoaded", function () {
   const startButton = document.getElementById("startCapture");
   const stopButton = document.getElementById("stopCapture");
-  const useServerCheckbox = document.getElementById("useServerCheckbox");
   const useVadCheckbox = document.getElementById("useVadCheckbox");
   const languageDropdown = document.getElementById("languageDropdown");
   const taskDropdown = document.getElementById("taskDropdown");
   const modelSizeDropdown = document.getElementById("modelSizeDropdown");
+  const sourceTabDropdown = document.getElementById("sourceTabDropdown");
 
-  // Mostrar qué pestaña quedó armada
-  chrome.storage.local.get("currentTabId", ({ currentTabId }) => {
-    updateTargetTabInfo(currentTabId);
+  // Mostrar qué fuente quedó armada, y poblar el selector
+  chrome.storage.local.get(["sourceType", "currentTabId"], ({ sourceType, currentTabId }) => {
+    updateTargetTabInfo(sourceType, currentTabId);
+    populateSourceTabDropdown(sourceType, currentTabId);
   });
 
-  // Si clickeás el ícono en otra pestaña mientras options.html sigue abierta,
-  // actualizamos el cartel sin que haga falta recargar.
+  document.getElementById("refreshTabsButton").addEventListener("click", () => {
+    chrome.storage.local.get(["sourceType", "currentTabId"], ({ sourceType, currentTabId }) => {
+      populateSourceTabDropdown(sourceType, currentTabId);
+    });
+  });
+
+  sourceTabDropdown.addEventListener("change", (event) => {
+    const value = event.target.value;
+    if (!value) return;
+
+    if (value === SYSTEM_AUDIO_VALUE) {
+      chrome.storage.local.set({ sourceType: "desktop" });
+      return;
+    }
+
+    chrome.storage.local.set({ sourceType: "tab", currentTabId: Number(value) });
+  });
+
+  // Si clickeás el ícono en otra pestaña mientras options.html sigue abierta
+  // (eso guarda sourceType: "tab" y el currentTabId nuevo), o si cambiás la
+  // fuente desde acá, actualizamos el cartel sin que haga falta recargar.
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === "local" && changes.currentTabId) {
-      updateTargetTabInfo(changes.currentTabId.newValue);
+    if (areaName !== "local") return;
+    if (changes.currentTabId || changes.sourceType) {
+      chrome.storage.local.get(["sourceType", "currentTabId"], ({ sourceType, currentTabId }) => {
+        updateTargetTabInfo(sourceType, currentTabId);
+      });
     }
   });
 
   // Restaurar preferencias guardadas
   chrome.storage.local.get(
-    ["useServerState", "useVadState", "selectedLanguage", "selectedTask", "selectedModelSize"],
+    ["useVadState", "selectedLanguage", "selectedTask", "selectedModelSize"],
     (result) => {
-      if (result.useServerState !== undefined) useServerCheckbox.checked = result.useServerState;
       if (result.useVadState !== undefined) useVadCheckbox.checked = result.useVadState;
-      if (result.selectedLanguage !== undefined) languageDropdown.value = result.selectedLanguage;
+      if (result.selectedLanguage !== undefined) languageDropdown.value = result.selectedLanguage || "";
       if (result.selectedTask !== undefined) taskDropdown.value = result.selectedTask;
       if (result.selectedModelSize !== undefined) modelSizeDropdown.value = result.selectedModelSize;
     }
   );
 
-  useServerCheckbox.addEventListener("change", () => {
-    chrome.storage.local.set({ useServerState: useServerCheckbox.checked });
-  });
   useVadCheckbox.addEventListener("change", () => {
     chrome.storage.local.set({ useVadState: useVadCheckbox.checked });
   });
@@ -121,17 +194,39 @@ document.addEventListener("DOMContentLoaded", function () {
   startButton.addEventListener("click", async () => {
     if (startButton.disabled) return;
 
-    chrome.storage.local.get("currentTabId", async ({ currentTabId }) => {
-      if (!currentTabId) {
-        setServerStatus("no se detectó pestaña a capturar", "red");
+    const host = "localhost";
+    const port = "9090";
+
+    const commonOptions = {
+      host,
+      port,
+      language: languageDropdown.value || null,
+      task: taskDropdown.value,
+      modelSize: modelSizeDropdown.value,
+      useVad: useVadCheckbox.checked,
+    };
+
+    chrome.storage.local.get(["sourceType", "currentTabId"], async ({ sourceType, currentTabId }) => {
+      if (sourceType === "desktop") {
+        // El picker nativo de Chrome lo va a mostrar el offscreen document
+        // al llamar getDisplayMedia() ahí adentro.
+        toggleCaptureButtons(true);
+        setServerStatus("conectando...", "yellow");
+
+        chrome.runtime.sendMessage({
+          type: "offscreen-start",
+          data: {
+            ...commonOptions,
+            sourceType: "desktop",
+          },
+        });
         return;
       }
 
-      let host = "localhost";
-      let port = "9090";
-      if (useServerCheckbox.checked) {
-        host = "boxerab--aavaaz-live-livetranscriber-web.modal.run";
-        port = "";
+      // Modo normal: capturar una pestaña específica.
+      if (!currentTabId) {
+        setServerStatus("no se detectó una fuente para capturar", "red");
+        return;
       }
 
       toggleCaptureButtons(true);
@@ -152,13 +247,9 @@ document.addEventListener("DOMContentLoaded", function () {
       chrome.runtime.sendMessage({
         type: "offscreen-start",
         data: {
+          ...commonOptions,
           streamId,
-          host,
-          port,
-          language: languageDropdown.value || null,
-          task: taskDropdown.value,
-          modelSize: modelSizeDropdown.value,
-          useVad: useVadCheckbox.checked,
+          sourceType: "tab",
         },
       });
     });

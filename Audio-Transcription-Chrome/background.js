@@ -142,7 +142,7 @@ async function ensureOffscreenDocument() {
 
   await chrome.offscreen.createDocument({
     url: "offscreen.html",
-    reasons: ["USER_MEDIA"],
+    reasons: ["USER_MEDIA", "DISPLAY_MEDIA"],
     justification: "Captura y envío continuo de audio para transcripción, sin depender de que una pestaña esté visible.",
   });
 
@@ -270,11 +270,16 @@ chrome.runtime.onMessage.addListener(async (message, sender) => {
     chrome.storage.local.set({ capturingState: { isCapturing: false } })
     stopCapture({saveCaptions: message.saveCaptions});
   } else if (message.type === "open-transcript-tab") {
+    // La página que se abre depende de la task elegida en options.html:
+    // "translate" abre la vista de traducción, cualquier otra cosa
+    // (o "transcribe") abre la vista estándar de siempre.
+    const selectedTask = await getLocalStorageValue("selectedTask");
+    const page = selectedTask === "translate" ? "translate.html" : "transcript.html";
     chrome.tabs.create({
-      url: `chrome-extension://${chrome.runtime.id}/transcript.html`,
+      url: `chrome-extension://${chrome.runtime.id}/${page}`,
       pinned: true,
       active: false,
-    });  
+    });
   } else if (message.type === "openTranscript") {
     transcriptTabId = message.tabId;
   } else if (message.type === "registerTranscript") {

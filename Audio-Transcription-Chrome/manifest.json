@@ -20,7 +20,9 @@
         "activeTab",
         "tabCapture",
         "scripting",
-        "offscreen"
+        "offscreen",
+        "tabs",
+        "desktopCapture"
     ],
     "icons": {
         "128":"icon128.png"

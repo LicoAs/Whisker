@@ -14,6 +14,13 @@
 
   <!-- NUEVO: estado del servidor -->
   <div id="serverStatus" class="status-container"><span id="statusDot" class="status-dot"></span> Estado: desconectado</div>
+  <div class="dropdown-container">
+    <label for="sourceTabDropdown">Fuente a capturar:</label>
+    <select id="sourceTabDropdown">
+      <option value="">-- Elegí una pestaña --</option>
+    </select>
+    <button id="refreshTabsButton" type="button">Actualizar lista</button>
+  </div>
   <div id="targetTabInfo" class="status-container">Vas a capturar: (ninguna pestaña seleccionada)</div>
 
   <div class="button-container">
@@ -21,10 +28,6 @@
     <div class="button" id="stopCapture" disabled>Stop Capture</div>
   </div>
 
-  <div class="checkbox-container">
-    <input type="checkbox" id="useServerCheckbox">
-    <label for="useServerCheckbox">Use Collabora Whisper-Live Server</label>
-  </div>
   <div class="checkbox-container">
     <input type="checkbox" id="useVadCheckbox">
     <label for="useVadCheckbox">Use Voice Activity Detection</label>

@@ -12,6 +12,23 @@ async function captureTabAudio(streamId) {
   });
 }
 
+// Captura TODO el audio del sistema. Usamos getDisplayMedia() directamente
+// (el método que Chrome recomienda para grabar pantalla desde un offscreen
+// document) en vez de chrome.desktopCapture + chromeMediaSource "desktop",
+// que resultó no andar bien acá adentro. Chrome muestra su propio diálogo
+// de "elegir qué compartir", con el checkbox de audio del sistema incluido
+// cuando se elige "Toda la pantalla". Pedimos video porque Chrome lo exige,
+// y lo descartamos enseguida, quedándonos solo con el audio.
+async function captureDesktopAudio() {
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    audio: true,
+    video: true,
+  });
+
+  stream.getVideoTracks().forEach((track) => track.stop());
+  return new MediaStream(stream.getAudioTracks());
+}
+
 function generateUUID() {
   let dt = new Date().getTime();
   const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
@@ -30,7 +47,7 @@ let currentStream = null;
 
 const WORKLET_URL = chrome.runtime.getURL('audiopreprocessor.js');
 
-async function initAudioWorklet(stream) {
+async function initAudioWorklet(stream, keepPlayback) {
   audioContext = new AudioContext();
   if (audioContext.state === 'suspended') {
     await audioContext.resume();
@@ -41,7 +58,13 @@ async function initAudioWorklet(stream) {
   const mediaStream = audioContext.createMediaStreamSource(stream);
 
   mediaStream.connect(preNode);
-  preNode.connect(audioContext.destination);
+  // Con "tab" hay que reconectar a destination porque Chrome silencia la
+  // pestaña original al capturarla (si no, no se escucharía nada). Con
+  // "desktop" (getDisplayMedia) el audio original sigue sonando solo,
+  // así que reconectar acá duplicaría el sonido.
+  if (keepPlayback) {
+    preNode.connect(audioContext.destination);
+  }
   preNode.port.onmessage = (event) => {
     const audio16k = event.data; // Float32Array @ 16 kHz
     if (socket && socket.readyState === WebSocket.OPEN && isServerReady) {
@@ -77,7 +100,9 @@ async function startRecord(option) {
 
   let stream;
   try {
-    stream = await captureTabAudio(option.streamId);
+    stream = option.sourceType === "desktop"
+      ? await captureDesktopAudio()
+      : await captureTabAudio(option.streamId);
   } catch (error) {
     console.error("No se pudo capturar la pestaña:", error);
     reportStatus("error al capturar audio", "red");
@@ -94,7 +119,7 @@ async function startRecord(option) {
     };
 
     try {
-      await initAudioWorklet(stream);
+      await initAudioWorklet(stream, option.sourceType !== "desktop");
     } catch (error) {
       console.error("Failed to initialize AudioWorklet:", error);
       reportStatus("error al iniciar el audio", "red");
