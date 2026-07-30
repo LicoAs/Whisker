@@ -142,12 +142,37 @@ async function ensureOffscreenDocument() {
 
   await chrome.offscreen.createDocument({
     url: "offscreen.html",
-    reasons: ["USER_MEDIA", "DISPLAY_MEDIA"],
+    reasons: ["USER_MEDIA"],
     justification: "Captura y envío continuo de audio para transcripción, sin depender de que una pestaña esté visible.",
   });
 
   console.log("Offscreen document creado.");
 }
+
+/**
+ * Si se cierra la ventana de options.html y en ese momento NO hay una
+ * captura en curso, cerramos el offscreen document (no tiene sentido
+ * dejarlo abierto sin usar). Si hay una captura activa, lo dejamos vivo
+ * a propósito: es justo el motivo por el que existe, para que la captura
+ * siga aunque cierres la ventana.
+ */
+chrome.tabs.onRemoved.addListener(async (closedTabId) => {
+  const optionTabId = await getLocalStorageValue("optionTabId");
+  if (closedTabId !== optionTabId) return;
+
+  await setLocalStorageValue("optionTabId", null);
+
+  const isCapturing = await getLocalStorageValue("isCapturing");
+  if (isCapturing) return;
+
+  const existingContexts = await chrome.runtime.getContexts({
+    contextTypes: ["OFFSCREEN_DOCUMENT"],
+  });
+  if (existingContexts.length > 0) {
+    await chrome.offscreen.closeDocument();
+    console.log("Offscreen document cerrado (no había captura activa).");
+  }
+});
 
 
 
@@ -280,6 +305,8 @@ chrome.runtime.onMessage.addListener(async (message, sender) => {
       pinned: true,
       active: false,
     });
+  } else if (message.type === "capturing-state") {
+    await setLocalStorageValue("isCapturing", message.isCapturing);
   } else if (message.type === "openTranscript") {
     transcriptTabId = message.tabId;
   } else if (message.type === "registerTranscript") {

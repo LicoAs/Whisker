@@ -96,6 +96,7 @@ function reportStatus(text, color = "gray") {
 }
 
 async function startRecord(option) {
+  chrome.runtime.sendMessage({ type: "capturing-state", isCapturing: true });
   reportStatus("conectando...", "yellow");
 
   let stream;
@@ -196,6 +197,7 @@ async function startRecord(option) {
 }
 
 function stopCaptureFlow() {
+  chrome.runtime.sendMessage({ type: "capturing-state", isCapturing: false });
   if (socket) {
     socket.close();
     socket = null;
