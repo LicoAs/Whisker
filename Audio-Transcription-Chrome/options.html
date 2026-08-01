@@ -47,21 +47,14 @@
       <option value="">Select Task</option>
       <option value="transcribe" selected>Transcribe</option>
       <option value="translate">Translate</option>
-      <option value="interpreter">Interpreter (2 columnas)</option>
+      <option value="interpreter_auto">Interpreter - Auto (experimental)</option>
+      <option value="interpreter_manual">Interpreter - Manual</option>
     </select>
   </div>
   <div class="dropdown-container">
-    <label for="columnLangLeftDropdown">Interpreter Mode — Columna izquierda:</label>
-    <select id="columnLangLeftDropdown">
-      <option value="es" selected>Español</option>
-      <option value="en">English</option>
-    </select>
-  </div>
-  <div class="dropdown-container">
-    <label for="columnLangRightDropdown">Interpreter Mode — Columna derecha:</label>
-    <select id="columnLangRightDropdown">
-      <option value="es">Español</option>
-      <option value="en" selected>English</option>
+    <label for="columnOrderDropdown">Orden de columnas (izquierda / derecha):</label>
+    <select id="columnOrderDropdown" disabled>
+      <option value="">-- Elegí un modo Interpreter --</option>
     </select>
   </div>
   <div class="dropdown-container">

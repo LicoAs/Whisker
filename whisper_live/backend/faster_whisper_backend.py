@@ -31,7 +31,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         send_last_n_segments=10,
         no_speech_thresh=0.45,
         clip_audio=False,
-        same_output_threshold=7,
+        same_output_threshold=3,
         cache_path="~/.cache/whisper-live/",
         translation_queue=None,
         hotwords=None,
@@ -87,6 +87,13 @@ class ServeClientFasterWhisper(ServeClientBase):
         # (ver on_segment_finalized), así no queda pegado a un idioma viejo,
         # pero tampoco se re-detecta en cada chunk parcial de la misma frase.
         self.utterance_language = None
+        # Cuánto audio (segundos) había cuando se fijó utterance_language
+        # por primera vez, y si ya se usó la re-chequeada de corrección.
+        # Sirven para permitir UNA sola corrección con más contexto más
+        # adelante en la misma frase (ver transcribe_audio), por si la
+        # primera detección se equivocó con una palabra corta/ambigua.
+        self.utterance_lang_locked_at_duration = None
+        self.utterance_lang_rechecked = False
         self.task = task
         self.initial_prompt = initial_prompt
         self.vad_parameters = vad_parameters or {"threshold": 0.3}
@@ -208,9 +215,57 @@ class ServeClientFasterWhisper(ServeClientBase):
         """
         if self.language_requested is None:
             self.utterance_language = None
+            self.utterance_lang_locked_at_duration = None
+            self.utterance_lang_rechecked = False
 
     def get_segment_language(self):
         return self.language_requested if self.language_requested is not None else self.utterance_language        
+
+    # Duración mínima (en segundos) de audio acumulado antes de confiar en
+    # detect_restricted_language(). Es un umbral aparte de MIN_CHUNK_DURATION_S
+    # (que solo controla cada cuánto se intenta procesar/chequear silencio):
+    # bajar ese umbral general hizo que la detección de idioma se disparara
+    # con muy poco audio (a veces 0.5s), y con tan poca info se equivoca
+    # más seguido entre es/en. Este valor mantiene la detección tan confiable
+    # como antes, sin perder la respuesta rápida del resto del pipeline.
+    MIN_DURATION_FOR_LANG_DETECTION_S = 1.0
+    SAMPLE_RATE = 16000
+    # Cuántos segundos más de audio (por encima del punto donde se fijó el
+    # idioma por primera vez) esperamos antes de re-chequear una sola vez.
+    # Evita quedar pegado a una detección inicial equivocada (ej. una
+    # palabra corta como "sí" escuchada como "see") cuando ya hay más
+    # contexto disponible que la desmiente.
+    RELANG_RECHECK_MARGIN_S = 0.7
+
+    def detect_restricted_language(self, input_sample, candidates=("es", "en")):
+        """
+        Restringe la auto-detección de idioma a un conjunto reducido de
+        candidatos (por default español e inglés), en vez de dejar que
+        Whisper elija libremente entre los ~100 idiomas que conoce. Evita
+        falsos positivos (japonés, árabe, etc.) en audio corto o ambiguo,
+        que es donde más se nota el error de la detección sin restringir.
+
+        Devuelve el código del candidato con mayor probabilidad, o None
+        si no se pudo determinar (en ese caso se sigue con el
+        comportamiento normal de auto-detect sin restricción, como
+        fallback seguro).
+        """
+        try:
+            _, _, all_language_probs = self.transcriber.detect_language(input_sample)
+        except Exception as e:
+            logging.warning(f"No se pudo restringir la detección de idioma, sigo sin restricción: {e}")
+            return None
+
+        if not all_language_probs:
+            return None
+
+        probs_by_lang = dict(all_language_probs)
+        best_lang = max(candidates, key=lambda lang: probs_by_lang.get(lang, 0.0))
+        logging.info(
+            f"Detección restringida ({'/'.join(candidates)}): "
+            f"es={probs_by_lang.get('es', 0.0):.3f} en={probs_by_lang.get('en', 0.0):.3f} -> {best_lang}"
+        )
+        return best_lang
 
     def transcribe_audio(self, input_sample):
         """
@@ -238,6 +293,46 @@ class ServeClientFasterWhisper(ServeClientBase):
             if self.language_requested is not None
             else self.utterance_language
         )
+
+        # Si estamos en auto-detect y todavía no detectamos el idioma de
+        # esta frase (recién arrancó el buffer), restringimos la detección
+        # a español/inglés en vez de dejar que corra el auto-detect normal
+        # de Whisper, que compite entre todos los idiomas que conoce.
+        # OJO: solo lo hacemos si ya hay suficiente audio acumulado
+        # (MIN_DURATION_FOR_LANG_DETECTION_S) — con muy poco audio la
+        # detección es poco confiable y forzar un idioma equivocado hace
+        # que Whisper "traduzca" en vez de transcribir tal cual. Si todavía
+        # no hay suficiente, esta vuelta se procesa sin idioma forzado
+        # (auto-detect normal de Whisper) y se reintenta la próxima vuelta
+        # con más audio.
+        if lang_for_transcribe is None and self.language_requested is None:
+            sample_duration_s = len(input_sample) / self.SAMPLE_RATE
+            if sample_duration_s >= self.MIN_DURATION_FOR_LANG_DETECTION_S:
+                restricted_lang = self.detect_restricted_language(input_sample)
+                if restricted_lang is not None:
+                    lang_for_transcribe = restricted_lang
+                    self.utterance_language = restricted_lang
+                    self.utterance_lang_locked_at_duration = sample_duration_s
+
+        # Re-chequeo de corrección (una sola vez por frase): si ya fijamos
+        # un idioma pero con poco audio pudo haberse equivocado (ej. una
+        # palabra corta mal escuchada), y ahora hay bastante más contexto
+        # acumulado, volvemos a preguntar. Si el resultado cambia, corregimos
+        # el rumbo para el resto de la frase en vez de seguir traduciendo mal.
+        elif (
+            self.language_requested is None
+            and self.utterance_language is not None
+            and not self.utterance_lang_rechecked
+            and self.utterance_lang_locked_at_duration is not None
+        ):
+            sample_duration_s = len(input_sample) / self.SAMPLE_RATE
+            if sample_duration_s >= self.utterance_lang_locked_at_duration + self.RELANG_RECHECK_MARGIN_S:
+                self.utterance_lang_rechecked = True
+                rechecked_lang = self.detect_restricted_language(input_sample)
+                if rechecked_lang is not None and rechecked_lang != self.utterance_language:
+                    logging.info(f"Corrigiendo idioma de la frase en curso: {self.utterance_language} -> {rechecked_lang}")
+                    self.utterance_language = rechecked_lang
+                    lang_for_transcribe = rechecked_lang
 
         # Batch inference path: submit to central queue and wait
         if ServeClientFasterWhisper.BATCH_WORKER is not None:

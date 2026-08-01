@@ -302,8 +302,10 @@ chrome.runtime.onMessage.addListener(async (message, sender) => {
     let page = "transcript.html";
     if (selectedTask === "translate") {
       page = "translate.html";
-    } else if (selectedTask === "interpreter") {
+    } else if (selectedTask === "interpreter_auto") {
       page = "interpreter.html";
+    } else if (selectedTask === "interpreter_manual") {
+      page = "manual.html";
     }
     chrome.windows.create({
       url: `chrome-extension://${chrome.runtime.id}/${page}`,

@@ -99,8 +99,7 @@ function toggleCaptureButtons(isCapturing) {
   const modelSizeDropdown = document.getElementById("modelSizeDropdown");
   const sourceTabDropdown = document.getElementById("sourceTabDropdown");
   const refreshTabsButton = document.getElementById("refreshTabsButton");
-  const columnLangLeftDropdown = document.getElementById("columnLangLeftDropdown");
-  const columnLangRightDropdown = document.getElementById("columnLangRightDropdown");
+  const columnOrderDropdown = document.getElementById("columnOrderDropdown");
 
   startButton.disabled = isCapturing;
   stopButton.disabled = !isCapturing;
@@ -112,8 +111,79 @@ function toggleCaptureButtons(isCapturing) {
   refreshTabsButton.disabled = isCapturing;
   startButton.classList.toggle("disabled", isCapturing);
   stopButton.classList.toggle("disabled", !isCapturing);
-  columnLangLeftDropdown.disabled = isCapturing;
-  columnLangRightDropdown.disabled = isCapturing;
+
+  const isInterpreterMode = taskDropdown.value === "interpreter_auto" || taskDropdown.value === "interpreter_manual";
+  columnOrderDropdown.disabled = isCapturing || !isInterpreterMode;
+}
+
+/**
+ * Repuebla el selector único "Orden de columnas" según el modo Interpreter
+ * elegido: Auto usa pares de idioma (ES/EN), Manual usa pares de canal
+ * (Client/LEP). Si no está en ninguno de los dos, queda deshabilitado.
+ */
+function populateColumnOrderOptions(task, columnOrderDropdown) {
+  const isAuto = task === "interpreter_auto";
+  const isManual = task === "interpreter_manual";
+
+  columnOrderDropdown.innerHTML = "";
+
+  if (!isAuto && !isManual) {
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    emptyOption.textContent = "-- Elegí un modo Interpreter --";
+    columnOrderDropdown.appendChild(emptyOption);
+    columnOrderDropdown.disabled = true;
+    return;
+  }
+
+  columnOrderDropdown.disabled = false;
+
+  const options = isAuto
+    ? [
+        { value: "es_en", label: "ES / EN" },
+        { value: "en_es", label: "EN / ES" },
+      ]
+    : [
+        { value: "client_lep", label: "Client / LEP" },
+        { value: "lep_client", label: "LEP / Client" },
+      ];
+
+  options.forEach(({ value, label }) => {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    columnOrderDropdown.appendChild(opt);
+  });
+
+  const storageKey = isAuto ? "columnOrderAuto" : "columnOrderManual";
+  chrome.storage.local.get([storageKey], (result) => {
+    const value = result[storageKey] || options[0].value;
+    columnOrderDropdown.value = value;
+    applyColumnOrder(task, value);
+  });
+}
+
+/**
+ * Traduce el valor elegido en el selector único ("es_en", "client_lep", etc.)
+ * a las claves de storage que ya leen interpreter.js y manual.js.
+ */
+function applyColumnOrder(task, value) {
+  if (!value) return;
+  const [left, right] = value.split("_");
+
+  if (task === "interpreter_auto") {
+    chrome.storage.local.set({
+      columnLangLeft: left,
+      columnLangRight: right,
+      columnOrderAuto: value,
+    });
+  } else if (task === "interpreter_manual") {
+    chrome.storage.local.set({
+      manualLeftChannel: left,
+      manualRightChannel: right,
+      columnOrderManual: value,
+    });
+  }
 }
 
 // Mensajes que llegan desde offscreen.js (a través del runtime, sin pasar
@@ -134,8 +204,7 @@ document.addEventListener("DOMContentLoaded", function () {
   const taskDropdown = document.getElementById("taskDropdown");
   const modelSizeDropdown = document.getElementById("modelSizeDropdown");
   const sourceTabDropdown = document.getElementById("sourceTabDropdown");
-  const columnLangLeftDropdown = document.getElementById("columnLangLeftDropdown");
-  const columnLangRightDropdown = document.getElementById("columnLangRightDropdown");
+  const columnOrderDropdown = document.getElementById("columnOrderDropdown");
 
   // Mostrar qué fuente quedó armada, y poblar el selector
   chrome.storage.local.get(["sourceType", "currentTabId"], ({ sourceType, currentTabId }) => {
@@ -175,14 +244,13 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // Restaurar preferencias guardadas
   chrome.storage.local.get(
-    ["useVadState", "selectedLanguage", "selectedTask", "selectedModelSize", "columnLangLeft", "columnLangRight"],
+    ["useVadState", "selectedLanguage", "selectedTask", "selectedModelSize"],
     (result) => {
       if (result.useVadState !== undefined) useVadCheckbox.checked = result.useVadState;
       if (result.selectedLanguage !== undefined) languageDropdown.value = result.selectedLanguage || "";
       if (result.selectedTask !== undefined) taskDropdown.value = result.selectedTask;
       if (result.selectedModelSize !== undefined) modelSizeDropdown.value = result.selectedModelSize;
-      if (result.columnLangLeft !== undefined) columnLangLeftDropdown.value = result.columnLangLeft;
-      if (result.columnLangRight !== undefined) columnLangRightDropdown.value = result.columnLangRight;
+      populateColumnOrderOptions(taskDropdown.value, columnOrderDropdown);
     }
   );
 
@@ -194,15 +262,13 @@ document.addEventListener("DOMContentLoaded", function () {
   });
   taskDropdown.addEventListener("change", () => {
     chrome.storage.local.set({ selectedTask: taskDropdown.value });
+    populateColumnOrderOptions(taskDropdown.value, columnOrderDropdown);
   });
   modelSizeDropdown.addEventListener("change", () => {
     chrome.storage.local.set({ selectedModelSize: modelSizeDropdown.value });
   });
-  columnLangLeftDropdown.addEventListener("change", () => {
-    chrome.storage.local.set({ columnLangLeft: columnLangLeftDropdown.value });
-  });
-  columnLangRightDropdown.addEventListener("change", () => {
-    chrome.storage.local.set({ columnLangRight: columnLangRightDropdown.value });
+  columnOrderDropdown.addEventListener("change", () => {
+    applyColumnOrder(taskDropdown.value, columnOrderDropdown.value);
   });
 
   startButton.addEventListener("click", async () => {
@@ -215,7 +281,7 @@ document.addEventListener("DOMContentLoaded", function () {
       host,
       port,
       language: languageDropdown.value || null,
-      task: taskDropdown.value === "interpreter" ? "transcribe" : taskDropdown.value,
+      task: (taskDropdown.value === "interpreter_auto" || taskDropdown.value === "interpreter_manual") ? "transcribe" : taskDropdown.value,
       modelSize: modelSizeDropdown.value,
       useVad: useVadCheckbox.checked,
     };

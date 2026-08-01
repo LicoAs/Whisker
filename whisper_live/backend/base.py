@@ -36,6 +36,10 @@ class ServeClientBase(object):
     """Whether to clip audio with no valid segments."""
     same_output_threshold: int
     """Number of repeated outputs before considering it as a valid segment."""
+    SILENCE_FLUSH_CHUNKS: int = 1
+    """Number of consecutive silent (no speech) chunks before flushing pending gray text."""
+    MIN_CHUNK_DURATION_S: float = 0.5
+    """Minimum seconds of unprocessed audio required before attempting a transcribe/silence check pass. Lower = more responsive (both for real speech and for silence flush), at the cost of more frequent, smaller transcribe calls."""
 
     MAX_TRANSCRIPT_LENGTH = 500
     MAX_TRANSLATION_QUEUE_SIZE = 100
@@ -68,6 +72,7 @@ class ServeClientBase(object):
         self.text = []
         self.current_out = ""
         self.prev_out = ""
+        self.silence_chunks = 0
         self.exit = False
         self.same_output_count = 0
         self.transcript = []
@@ -115,7 +120,7 @@ class ServeClientBase(object):
                 self.clip_audio_if_no_valid_segment()
 
             input_bytes, duration = self.get_audio_chunk_for_processing()
-            if duration < 1.0:
+            if duration < self.MIN_CHUNK_DURATION_S:
                 time.sleep(0.1)     # wait for audio chunks to arrive
                 continue
             try:
@@ -123,10 +128,26 @@ class ServeClientBase(object):
                 t0 = time.time()
                 result = self.transcribe_audio(input_sample)
 
-                if result is None or self.language is None:
+                # "Sin novedad" cubre dos casos: result es None (VAD filtró
+                # el 100% del chunk, silencio puro) y result es una lista
+                # vacía (VAD detectó algo de sonido -respiración, ruido de
+                # fondo, cola de una palabra- pero Whisper no generó ningún
+                # segmento transcribible). Ambos cuentan igual para el
+                # contador de silencio: si hay texto gris pendiente, se
+                # confirma en vez de quedarse esperando indefinidamente.
+                no_output = result is None or len(result) == 0
+
+                if no_output or self.language is None:
+                    if no_output:
+                        self.silence_chunks += 1
+                        if self.current_out.strip() != '' and self.silence_chunks >= self.SILENCE_FLUSH_CHUNKS:
+                            self.flush_pending_on_silence(duration)
+                            self.silence_chunks = 0
                     self.timestamp_offset += duration
-                    time.sleep(0.25)    # wait for voice activity, result is None when no voice activity
+                    time.sleep(0.25)    # wait for voice activity, no_output is True when no voice activity
                     continue
+                else:
+                    self.silence_chunks = 0
                 wl_metrics.track_transcription_latency(time.time() - t0)
                 wl_metrics.track_audio_processed(duration)
                 self.handle_transcription_output(result, duration)
@@ -150,6 +171,38 @@ class ServeClientBase(object):
         detectado y que la frase nueva se detecte de cero).
         """
         pass
+
+    def flush_pending_on_silence(self, duration):
+        """
+        Confirma el texto gris pendiente (current_out) cuando hubo silencio
+        prolongado y no llegó un segundo resultado de Whisper contra el cual
+        compararlo. Hace lo mismo que el bloque de same_output_threshold en
+        update_segments, pero disparado por tiempo de silencio en vez de por
+        texto repetido.
+        """
+        if not self.current_out.strip():
+            return
+        with self.lock:
+            if not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower():
+                self.text.append(self.current_out)
+                completed_segment = self.format_segment(
+                    self.timestamp_offset,
+                    self.timestamp_offset + duration,
+                    self.current_out,
+                    completed=True,
+                    language=self.get_segment_language()
+                )
+                self.transcript.append(completed_segment)
+                if self.translation_queue:
+                    try:
+                        self.translation_queue.put(completed_segment.copy(), timeout=0.1)
+                    except queue.Full:
+                        logging.warning("Translation queue is full, skipping segment")
+        self.current_out = ''
+        self.prev_out = ''
+        self.same_output_count = 0
+        self.end_time_for_same_output = None
+        self.on_segment_finalized()
 
     def format_segment(self, start, end, text, completed=False, speaker=None, words=None, language=None):
         """
@@ -406,6 +459,7 @@ class ServeClientBase(object):
         offset = None
         self.current_out = ''
         last_segment = None
+        print(f"[DEBUG] segments del modelo: {len(segments)} | current_out antes: '{self.current_out}'")
 
         # Process complete segments only if there are more than one
         # and if the last segment's no_speech_prob is below the threshold.
@@ -449,6 +503,7 @@ class ServeClientBase(object):
         # Handle repeated output logic.
         if self.current_out.strip() == self.prev_out.strip() and self.current_out != '':
             self.same_output_count += 1
+            print(f"[DEBUG] salida repetida, count={self.same_output_count} | texto='{self.current_out.strip()[:50]}'")
 
             # if we remove the audio because of same output on the nth reptition we might remove the 
             # audio thats not yet transcribed so, capturing the time when it was repeated for the first time
