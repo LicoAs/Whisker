@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Transcription</title>
+    <style>
+        body {
+            background: #111;
+            color: white;
+            font-family: Arial, sans-serif;
+            padding: 30px;
+        }
+
+        h1 {
+            font-size: 28px;
+        }
+        
+        #transcript {
+            font-size: 32px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+        }
+
+        #history {
+            color: white;
+        }
+        #current {
+            color: #888;
+            margin-top: 8px;
+            font-style: italic;
+        }
+        #toolbar {
+            margin-bottom: 20px;
+        }
+
+        #clearBtn {
+            background: #c62828;
+            color: white;
+            border: none;
+            padding: 10px 18px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+
+        #clearBtn:hover {
+            background: #e53935;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Live Transcription</h1>
+<div id="toolbar">
+    <button id="clearBtn">Clear</button>
+</div>
+<div id="transcript">
+    <div id="history"></div>
+    <div id="current"></div>
+</div>
+
+<script src="transcript.js"></script>
+
+</body>
+</html>

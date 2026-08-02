@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Audio Transcription</title>
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="style.css" type="text/css">
+</head>
+
+<body>
+  <div class="header"><img src="./icon128.png"/> <h1>Audio Transcription</h1></div>
+
+  <!-- NUEVO: estado del servidor -->
+  <div id="serverStatus" class="status-container"><span id="statusDot" class="status-dot"></span> Estado: desconectado</div>
+  <div id="targetTabInfo" class="status-container">Vas a capturar: (ninguna pestaña seleccionada)</div>
+
+  <div class="button-container">
+    <div class="button" id="startCapture">Start Capture</div>
+    <div class="button" id="stopCapture" disabled>Stop Capture</div>
+  </div>
+
+  <div class="checkbox-container">
+    <input type="checkbox" id="useServerCheckbox">
+    <label for="useServerCheckbox">Use Collabora Whisper-Live Server</label>
+  </div>
+  <div class="checkbox-container">
+    <input type="checkbox" id="useVadCheckbox">
+    <label for="useVadCheckbox">Use Voice Activity Detection</label>
+  </div>
+
+  <div class="dropdown-container">
+    <label for="languageDropdown">Select Language:</label>
+    <select id="languageDropdown">
+      <option value="" selected>Automatically detect</option>
+      <option value="en">English</option>
+      <option value="es">Spanish</option>
+    </select>
+  </div>
+  <div class="dropdown-container">
+    <label for="taskDropdown">Select task:</label>
+    <select id="taskDropdown">
+      <option value="">Select Task</option>
+      <option value="transcribe" selected>Transcribe</option>
+      <option value="translate">Translate</option>
+    </select>
+  </div>
+  <div class="dropdown-container">
+    <label for="modelSizeDropdown">Select Model Size (experimental):</label>
+    <select id="modelSizeDropdown">
+      <option value="">Select model</option>
+      <option value="tiny">Tiny</option>
+      <option value="tiny.en">Tiny (English-only)</option>
+      <option value="base">Base</option>
+      <option value="base.en">Base (English-only)</option>
+      <option value="small" selected>Small</option>
+      <option value="small.en">Small (English-only)</option>
+      <option value="medium">Medium</option>
+      <option value="medium.en">Medium (English-only)</option>
+      <option value="large-v2">Large-v2</option>
+      <option value="large-v3">Large-v3</option>
+    </select>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+
+</html>
