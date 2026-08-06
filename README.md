@@ -12,6 +12,21 @@ src="https://img.youtube.com/vi/0PHWCApIcCI/0.jpg" style="background-color:rgba(
 This project is a real-time transcription application that uses the OpenAI Whisper model
 to convert speech input into text output. It can be used to transcribe both live audio
 input from microphone and pre-recorded audio files.
+## AMD ROCm on Windows
+
+Experimental support for Faster-Whisper with CTranslate2 and ROCm 6.2 on Windows has been validated on an AMD Radeon RX 6700 XT (`gfx1031`).
+
+The setup includes:
+
+- CTranslate2 4.7.1 compiled natively against ROCm 6.2
+- `float16` inference
+- Faster-Whisper integration
+- WhisperLive live transcription
+- Confirmed GPU utilization
+
+See the complete build and integration guide:
+
+[Running Faster-Whisper with ROCm 6.2 on Windows and RDNA2](docs/ROCM_WINDOWS_RDNA2.md)
 
 - [Installation](#installation)
 - [Getting Started](#getting-started)
