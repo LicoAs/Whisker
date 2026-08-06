@@ -3,7 +3,19 @@ import json
 import logging
 import threading
 import time
-import torch
+
+# Make the ROCm 6.2 runtime visible to Python before importing CTranslate2.
+# Keep the directory handle alive for the lifetime of the process.
+ROCM_BIN = os.environ.get(
+    "ROCM_BIN",
+    r"C:\Program Files\AMD\ROCm\6.2\bin",
+)
+_ROCM_DLL_DIRECTORY = None
+
+if os.name == "nt" and os.path.isdir(ROCM_BIN):
+    os.environ["PATH"] = ROCM_BIN + os.pathsep + os.environ.get("PATH", "")
+    _ROCM_DLL_DIRECTORY = os.add_dll_directory(ROCM_BIN)
+
 import ctranslate2
 from huggingface_hub import snapshot_download
 
@@ -99,16 +111,24 @@ class ServeClientFasterWhisper(ServeClientBase):
         self.vad_parameters = vad_parameters or {"threshold": 0.3}
         self.hotwords = hotwords
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        if device == "cuda":
-            major, _ = torch.cuda.get_device_capability(device)
-            self.compute_type = "float16" if major >= 7 else "float32"
-        else:
-            self.compute_type = "int8"
+        # Detect the GPU through CTranslate2 itself. PyTorch CUDA detection is
+        # not valid for this Windows ROCm build, while CTranslate2 reports the
+        # RX 6700 XT as a CUDA-compatible device through its HIP backend.
+        if device is None:
+            device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+
+        self.compute_type = "float16" if device == "cuda" else "int8"
 
         if self.model_size_or_path is None:
             return
-        logging.info(f"Using Device={device} with precision {self.compute_type}")
+
+        logging.info(
+            "Using CTranslate2 device=%s with precision=%s "
+            "(ROCm devices detected=%d)",
+            device,
+            self.compute_type,
+            ctranslate2.get_cuda_device_count(),
+        )
     
         try:
             if single_model:

@@ -1,5 +1,10 @@
 import argparse
 import os
+
+ROCM_BIN = r"C:\Program Files\AMD\ROCm\6.2\bin"
+_ROCM_DLL_DIRECTORY = os.add_dll_directory(ROCM_BIN)
+os.environ["PATH"] = ROCM_BIN + os.pathsep + os.environ.get("PATH", "")
+
 import threading
 import logging
 from fastapi import FastAPI
