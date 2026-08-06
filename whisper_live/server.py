@@ -148,6 +148,7 @@ class BackendType(Enum):
     FASTER_WHISPER = "faster_whisper"
     TENSORRT = "tensorrt"
     OPENVINO = "openvino"
+    WHISPER_CPP_VULKAN = "whisper_cpp_vulkan"
 
     @staticmethod
     def valid_types() -> List[str]:
@@ -166,6 +167,9 @@ class BackendType(Enum):
     def is_openvino(self) -> bool:
         return self == BackendType.OPENVINO
 
+    def is_whisper_cpp_vulkan(self) -> bool:
+        return self == BackendType.WHISPER_CPP_VULKAN
+
 
 class TranscriptionServer:
     RATE = 16000
@@ -179,6 +183,7 @@ class TranscriptionServer:
         self.raw_pcm_input = False
         self.audio_formats = {}
         self.segment_post_processor = None
+        self.whisper_cpp_server_url = "http://127.0.0.1:8080/inference"
 
     def initialize_client(
         self, websocket, options, faster_whisper_custom_model_path,
@@ -269,6 +274,39 @@ class TranscriptionServer:
                     "status": "WARNING",
                     "message": "OpenVINO not supported on Server yet. "
                                 "Reverting to available backend: 'faster_whisper'"
+                }))
+
+        if self.backend.is_whisper_cpp_vulkan():
+            try:
+                from whisper_live.backend.whispercpp_vulkan_backend import ServeClientWhisperCppVulkan
+                client = ServeClientWhisperCppVulkan(
+                    websocket,
+                    language=options["language"],
+                    task=options["task"],
+                    client_uid=options["uid"],
+                    server_url=self.whisper_cpp_server_url,
+                    send_last_n_segments=options.get("send_last_n_segments", 10),
+                    # whisper.cpp devuelve no_speech_prob en una escala distinta a
+                    # faster_whisper (habla real dio ~0.28 en nuestras pruebas, contra
+                    # ~0.0 típico de faster_whisper) — el default de 0.45 calibrado
+                    # para faster_whisper descartaba habla real como si fuera silencio.
+                    no_speech_thresh=options.get("no_speech_thresh_whisper_cpp", 0.68),
+                    clip_audio=options.get("clip_audio", False),
+                    same_output_threshold=options.get("same_output_threshold", 1),
+                    translation_queue=translation_queue,
+                    diarization=self._create_diarizer(options),
+                    word_timestamps=options.get("word_timestamps", False),
+                )
+                logging.info("Running whisper.cpp/Vulkan backend.")
+            except Exception as e:
+                logging.error(f"whisper.cpp/Vulkan backend not available: {e}")
+                self.backend = BackendType.FASTER_WHISPER
+                self.client_uid = options["uid"]
+                websocket.send(json.dumps({
+                    "uid": self.client_uid,
+                    "status": "WARNING",
+                    "message": "whisper.cpp/Vulkan backend not available on Server. "
+                               "Reverting to available backend: 'faster_whisper'"
                 }))
 
         try:
@@ -605,7 +643,8 @@ class TranscriptionServer:
             metrics_port: int = 0,
             api_key: Optional[str] = None,
             rate_limit_rpm: int = 0,
-            segment_post_processor=None):
+            segment_post_processor=None,
+            whisper_cpp_server_url: str = "http://127.0.0.1:8080/inference"):
         """
         Run the transcription server.
 
@@ -629,6 +668,7 @@ class TranscriptionServer:
         """
         self.cache_path = cache_path
         self.raw_pcm_input = raw_pcm_input
+        self.whisper_cpp_server_url = whisper_cpp_server_url
 
         if max_clients < 1:
             raise ValueError(f"max_clients must be >= 1, got {max_clients}")
