@@ -50,6 +50,21 @@ source whisper_env/bin/activate
 ```bash
  pip install whisper-live
 ```
+## AMD ROCm on Windows
+
+Experimental support for Faster-Whisper with CTranslate2 and ROCm 6.2 on Windows has been validated on an AMD Radeon RX 6700 XT (`gfx1031`).
+
+The setup includes:
+
+- CTranslate2 4.7.1 compiled natively against ROCm 6.2
+- `float16` inference
+- Faster-Whisper integration
+- WhisperLive live transcription
+- Confirmed GPU utilization
+
+See the complete build and integration guide:
+
+[Running Faster-Whisper with ROCm 6.2 on Windows and RDNA2](docs/ROCM_WINDOWS_RDNA2.md)
 
 ### OpenAI REST interface
 
