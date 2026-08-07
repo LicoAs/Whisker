@@ -3,9 +3,15 @@ import socket
 import subprocess
 import sys
 import time
+import json
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = ROOT / "whisker_config.json"
+
+with CONFIG_PATH.open("r", encoding="utf-8") as file:
+    CONFIG = json.load(file)
 
 VULKAN_ROOT = Path(r"C:\whisper-vulkan-test")
 VULKAN_SERVER = VULKAN_ROOT / "whisper-server.exe"
@@ -20,7 +26,7 @@ COMMON_ARGS = [
 BACKENDS = {
     "cpu": {
         "label": "Faster-Whisper — CPU",
-        "command": [r"C:\Whisker\venv-cpu\Scripts\python.exe",
+        "command": [CONFIG["cpu_python"],
         *COMMON_ARGS,
         "--backend", "faster_whisper",],
     },
