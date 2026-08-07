@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 
-ROOT = Path(r"C:\Users\Lico\WhisperLive\WhisperLive")
+ROOT = Path(__file__).resolve().parent
 LAUNCHER = ROOT / "whisker_launcher.py"
 STATE_FILE = ROOT / ".whisker_backend_state.json"
 
