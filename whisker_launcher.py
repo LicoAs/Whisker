@@ -3,13 +3,19 @@ import socket
 import subprocess
 import sys
 import time
+import json
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\Lico\WhisperLive\WhisperLive")
 
-VULKAN_ROOT = Path(r"C:\whisper-vulkan-test")
-VULKAN_SERVER = VULKAN_ROOT / "whisper-server.exe"
-VULKAN_MODEL = VULKAN_ROOT / "models" / "ggml-small.bin"
+ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = ROOT / "whisker_config.json"
+
+with CONFIG_PATH.open("r", encoding="utf-8") as file:
+    CONFIG = json.load(file)
+
+VULKAN_SERVER = Path(CONFIG["vulkan_server"])
+VULKAN_MODEL = Path(CONFIG["vulkan_model"])
+VULKAN_ROOT = VULKAN_SERVER.parent
 
 COMMON_ARGS = [
     "run_server.py",
@@ -20,7 +26,7 @@ COMMON_ARGS = [
 BACKENDS = {
     "cpu": {
         "label": "Faster-Whisper — CPU",
-        "command": [r"C:\Whisker\venv-cpu\Scripts\python.exe",
+        "command": [CONFIG["cpu_python"],
         *COMMON_ARGS,
         "--backend", "faster_whisper",],
     },
@@ -35,7 +41,7 @@ BACKENDS = {
     "rocm": {
         "label": "Faster-Whisper — ROCm",
         "command": [
-            r"C:\Whisker\venv-rocm62\Scripts\python.exe",
+            CONFIG["rocm_python"],
             *COMMON_ARGS,
             "--backend", "faster_whisper",
         ],
@@ -47,7 +53,7 @@ def build_environment(backend):
     env = os.environ.copy()
 
     if backend == "rocm":
-        rocm_path = r"C:\Program Files\AMD\ROCm\6.2"
+        rocm_path = CONFIG["rocm_path"]
         env["ROCM_PATH"] = rocm_path
         env["HIP_PATH"] = rocm_path
         env["PATH"] = str(Path(rocm_path) / "bin") + os.pathsep + env.get("PATH", "")

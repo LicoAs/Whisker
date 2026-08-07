@@ -1,0 +1,7 @@
+{
+    "cpu_python": "C:\\path\\to\\venv-cpu\\Scripts\\python.exe",
+    "rocm_python": "C:\\path\\to\\venv-rocm\\Scripts\\python.exe",
+    "rocm_path": "C:\\Program Files\\AMD\\ROCm\\6.2",
+    "vulkan_server": "C:\\path\\to\\whisper-server.exe",
+    "vulkan_model": "C:\\path\\to\\models\\ggml-small.bin"
+}
