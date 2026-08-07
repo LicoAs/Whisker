@@ -13,9 +13,9 @@ CONFIG_PATH = ROOT / "whisker_config.json"
 with CONFIG_PATH.open("r", encoding="utf-8") as file:
     CONFIG = json.load(file)
 
-VULKAN_ROOT = Path(r"C:\whisper-vulkan-test")
-VULKAN_SERVER = VULKAN_ROOT / "whisper-server.exe"
-VULKAN_MODEL = VULKAN_ROOT / "models" / "ggml-small.bin"
+VULKAN_SERVER = Path(CONFIG["vulkan_server"])
+VULKAN_MODEL = Path(CONFIG["vulkan_model"])
+VULKAN_ROOT = VULKAN_SERVER.parent
 
 COMMON_ARGS = [
     "run_server.py",
