@@ -371,8 +371,6 @@ class ServeClientFasterWhisper(ServeClientBase):
             request.future.wait(timeout=30)
             if request.error:
                 raise request.error
-            if self.language_requested is None and self.utterance_language is None and request.info is not None:
-                self.utterance_language = request.info.language
             if self.language is None and request.info is not None:
                 self.set_language(request.info)
             return request.result
@@ -391,9 +389,6 @@ class ServeClientFasterWhisper(ServeClientBase):
             word_timestamps=self.word_timestamps)
         if ServeClientFasterWhisper.SINGLE_MODEL:
             ServeClientFasterWhisper.SINGLE_MODEL_LOCK.release()
-
-        if self.language_requested is None and self.utterance_language is None and info is not None:
-            self.utterance_language = info.language
 
         if self.language is None and info is not None:
             self.set_language(info)
