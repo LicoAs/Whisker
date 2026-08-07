@@ -38,6 +38,11 @@ class ServeClientBase(object):
     """Number of repeated outputs before considering it as a valid segment."""
     SILENCE_FLUSH_CHUNKS: int = 1
     """Number of consecutive silent (no speech) chunks before flushing pending gray text."""
+    TRAILING_SILENCE_FINALIZE_S: float = 1.5
+    """Finalize a single provisional segment once this much silence follows its reported end."""
+
+    NO_OUTPUT_OVERLAP_S: float = 0.5
+    """Keep this much audio after an empty transcription so the next pass can re-hear the boundary."""
     MIN_CHUNK_DURATION_S: float = 0.5
     """Minimum seconds of unprocessed audio required before attempting a transcribe/silence check pass. Lower = more responsive (both for real speech and for silence flush), at the cost of more frequent, smaller transcribe calls."""
 
@@ -143,7 +148,16 @@ class ServeClientBase(object):
                         if self.current_out.strip() != '' and self.silence_chunks >= self.SILENCE_FLUSH_CHUNKS:
                             self.flush_pending_on_silence(duration)
                             self.silence_chunks = 0
-                    self.timestamp_offset += duration
+
+                        advance = max(0.0, duration - self.NO_OUTPUT_OVERLAP_S)
+                        self.timestamp_offset += advance
+                        print(
+                            f"[DEBUG] no_output: duration={duration:.3f}s "
+                            f"advance={advance:.3f}s overlap={duration - advance:.3f}s"
+                        )
+                    else:
+                        self.timestamp_offset += duration
+
                     time.sleep(0.25)    # wait for voice activity, no_output is True when no voice activity
                     continue
                 else:
@@ -500,47 +514,66 @@ class ServeClientBase(object):
                     language=self.get_segment_language()
                 )
 
+        # If Whisper reports a single provisional segment followed by enough trailing
+        # silence, finalize it at Whisper's own segment end instead of waiting for an
+        # exact text repetition. This prevents old speech from pinning the processing
+        # offset while the input buffer keeps growing.
+        finalized_on_trailing_silence = False
+        if len(segments) == 1 and self.current_out.strip():
+            segment_end = min(duration, self.get_segment_end(segments[-1]))
+            trailing_silence = max(0.0, duration - segment_end)
+            if trailing_silence >= self.TRAILING_SILENCE_FINALIZE_S:
+                if not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower():
+                    self.text.append(self.current_out)
+                    with self.lock:
+                        completed_segment = self.format_segment(
+                            self.timestamp_offset + self.get_segment_start(segments[-1]),
+                            self.timestamp_offset + segment_end,
+                            self.current_out,
+                            completed=True,
+                            speaker=self._identify_speaker(segments[-1]),
+                            words=words,
+                            language=self.get_segment_language()
+                        )
+                        self.transcript.append(completed_segment)
+
+                        if self.translation_queue:
+                            try:
+                                self.translation_queue.put(completed_segment.copy(), timeout=0.1)
+                            except queue.Full:
+                                logging.warning("Translation queue is full, skipping segment")
+
+                print(
+                    f"[DEBUG] finalizado por silencio final: "
+                    f"segment_end={segment_end:.3f}s trailing={trailing_silence:.3f}s "
+                    f"texto='{self.current_out.strip()[:50]}'"
+                )
+                self.current_out = ''
+                self.prev_out = ''
+                self.same_output_count = 0
+                self.end_time_for_same_output = None
+                offset = duration
+                last_segment = None
+                finalized_on_trailing_silence = True
+
         # Handle repeated output logic.
-        if self.current_out.strip() == self.prev_out.strip() and self.current_out != '':
-            self.same_output_count += 1
-            print(f"[DEBUG] salida repetida, count={self.same_output_count} | texto='{self.current_out.strip()[:50]}'")
+        if not finalized_on_trailing_silence:
+            if self.current_out.strip() == self.prev_out.strip() and self.current_out != '':
+                self.same_output_count += 1
+                print(f"[DEBUG] salida repetida, count={self.same_output_count} | texto='{self.current_out.strip()[:50]}'")
 
-            # if we remove the audio because of same output on the nth reptition we might remove the 
-            # audio thats not yet transcribed so, capturing the time when it was repeated for the first time
-            if self.end_time_for_same_output is None:
-                self.end_time_for_same_output = self.get_segment_end(segments[-1])
-            time.sleep(0.1)  # wait briefly for any new voice activity
-        else:
-            self.same_output_count = 0
-            self.end_time_for_same_output = None
+                # if we remove the audio because of same output on the nth reptition we might remove the 
+                # audio thats not yet transcribed so, capturing the time when it was repeated for the first time
+                if self.end_time_for_same_output is None:
+                    self.end_time_for_same_output = self.get_segment_end(segments[-1])
+                time.sleep(0.1)  # wait briefly for any new voice activity
+            else:
+                self.same_output_count = 0
+                self.end_time_for_same_output = None
 
-        # If the same incomplete segment is repeated too many times,
-        # append it to the transcript and update the offset.
-        if self.same_output_count > self.same_output_threshold:
-            if not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower():
-                self.text.append(self.current_out)
-                with self.lock:
-                    completed_segment = self.format_segment(
-                        self.timestamp_offset,
-                        self.timestamp_offset + min(duration, self.end_time_for_same_output),
-                        self.current_out,
-                        completed=True,
-                        language=self.get_segment_language()
-                    )
-                    self.transcript.append(completed_segment)
-
-                    if self.translation_queue:
-                        try:
-                            self.translation_queue.put(completed_segment.copy(), timeout=0.1)
-                        except queue.Full:
-                            logging.warning("Translation queue is full, skipping segment")
-
-            self.current_out = ''
-            offset = min(duration, self.end_time_for_same_output)
-            self.same_output_count = 0
-            last_segment = None
-            self.end_time_for_same_output = None
-        else:
+            # Experimental: repeated text is diagnostic only. Do not finalize or
+            # advance timestamp_offset from same_output; wait for either a later
+            # segment or the trailing-silence finalizer above.
             self.prev_out = self.current_out
 
         if offset is not None:

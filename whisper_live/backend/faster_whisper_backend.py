@@ -270,11 +270,26 @@ class ServeClientFasterWhisper(ServeClientBase):
         comportamiento normal de auto-detect sin restricción, como
         fallback seguro).
         """
+        detect_t0 = time.perf_counter()
+        input_duration_s = len(input_sample) / self.SAMPLE_RATE
         try:
             _, _, all_language_probs = self.transcriber.detect_language(input_sample)
         except Exception as e:
+            detect_elapsed_s = time.perf_counter() - detect_t0
+            logging.info(
+                "[TIMING] detect_language input=%.3fs took=%.3fs error=yes",
+                input_duration_s,
+                detect_elapsed_s,
+            )
             logging.warning(f"No se pudo restringir la detección de idioma, sigo sin restricción: {e}")
             return None
+
+        detect_elapsed_s = time.perf_counter() - detect_t0
+        logging.info(
+            "[TIMING] detect_language input=%.3fs took=%.3fs error=no",
+            input_duration_s,
+            detect_elapsed_s,
+        )
 
         if not all_language_probs:
             return None
@@ -303,6 +318,9 @@ class ServeClientFasterWhisper(ServeClientBase):
             depends on the implementation of the `transcriber.transcribe` method but typically
             includes the transcribed text.
         """
+        total_t0 = time.perf_counter()
+        input_duration_s = len(input_sample) / self.SAMPLE_RATE
+
         # Si el cliente pidió un idioma fijo, se usa siempre ese.
         # Si pidió auto-detect (language_requested is None), usamos el
         # idioma ya detectado para ESTA frase si lo tenemos; si la frase
@@ -325,14 +343,22 @@ class ServeClientFasterWhisper(ServeClientBase):
         # no hay suficiente, esta vuelta se procesa sin idioma forzado
         # (auto-detect normal de Whisper) y se reintenta la próxima vuelta
         # con más audio.
+        # Si esta vuelta detecta un idioma restringido, lo usamos para ESTA
+        # inferencia pero no lo fijamos todavía como idioma de la frase.
+        # Solo se confirma después si la inferencia realmente devuelve voz.
+        # Así un bloque de silencio no puede dejar preparado un idioma falso
+        # para la intervención siguiente.
+        pending_utterance_language = None
+        pending_utterance_lang_duration = None
+
         if lang_for_transcribe is None and self.language_requested is None:
             sample_duration_s = len(input_sample) / self.SAMPLE_RATE
             if sample_duration_s >= self.MIN_DURATION_FOR_LANG_DETECTION_S:
                 restricted_lang = self.detect_restricted_language(input_sample)
                 if restricted_lang is not None:
                     lang_for_transcribe = restricted_lang
-                    self.utterance_language = restricted_lang
-                    self.utterance_lang_locked_at_duration = sample_duration_s
+                    pending_utterance_language = restricted_lang
+                    pending_utterance_lang_duration = sample_duration_s
 
         # Re-chequeo de corrección (una sola vez por frase): si ya fijamos
         # un idioma pero con poco audio pudo haberse equivocado (ej. una
@@ -367,31 +393,96 @@ class ServeClientFasterWhisper(ServeClientBase):
                 word_timestamps=self.word_timestamps,
                 client_uid=self.client_uid,
             )
+            batch_t0 = time.perf_counter()
             ServeClientFasterWhisper.BATCH_WORKER.submit(request)
             request.future.wait(timeout=30)
+            batch_elapsed_s = time.perf_counter() - batch_t0
             if request.error:
                 raise request.error
+            if (
+                pending_utterance_language is not None
+                and request.result is not None
+                and len(request.result) > 0
+            ):
+                self.utterance_language = pending_utterance_language
+                self.utterance_lang_locked_at_duration = pending_utterance_lang_duration
+                logging.info(
+                    "Idioma de frase confirmado tras voz: %s (%.3fs)",
+                    self.utterance_language,
+                    self.utterance_lang_locked_at_duration,
+                )
+            elif pending_utterance_language is not None:
+                logging.info(
+                    "Idioma candidato descartado por no_output: %s",
+                    pending_utterance_language,
+                )
+
             if self.language is None and request.info is not None:
                 self.set_language(request.info)
+
+            total_elapsed_s = time.perf_counter() - total_t0
+            logging.info(
+                "[TIMING] transcribe input=%.3fs lang=%s call=%.3fs total=%.3fs mode=batch",
+                input_duration_s,
+                lang_for_transcribe or "auto",
+                batch_elapsed_s,
+                total_elapsed_s,
+            )
             return request.result
 
         # Original lock-based path (backward compatible)
+        lock_wait_s = 0.0
         if ServeClientFasterWhisper.SINGLE_MODEL:
+            lock_t0 = time.perf_counter()
             ServeClientFasterWhisper.SINGLE_MODEL_LOCK.acquire()
-        result, info = self.transcriber.transcribe(
-            input_sample,
-            initial_prompt=self.initial_prompt,
-            language=lang_for_transcribe,
-            task=self.task,
-            vad_filter=self.use_vad,
-            vad_parameters=self.vad_parameters if self.use_vad else None,
-            hotwords=self.hotwords,
-            word_timestamps=self.word_timestamps)
-        if ServeClientFasterWhisper.SINGLE_MODEL:
-            ServeClientFasterWhisper.SINGLE_MODEL_LOCK.release()
+            lock_wait_s = time.perf_counter() - lock_t0
+
+        transcribe_t0 = time.perf_counter()
+        try:
+            result, info = self.transcriber.transcribe(
+                input_sample,
+                initial_prompt=self.initial_prompt,
+                language=lang_for_transcribe,
+                task=self.task,
+                vad_filter=self.use_vad,
+                vad_parameters=self.vad_parameters if self.use_vad else None,
+                hotwords=self.hotwords,
+                word_timestamps=self.word_timestamps)
+        finally:
+            transcribe_elapsed_s = time.perf_counter() - transcribe_t0
+            if ServeClientFasterWhisper.SINGLE_MODEL:
+                ServeClientFasterWhisper.SINGLE_MODEL_LOCK.release()
+
+        if (
+            pending_utterance_language is not None
+            and result is not None
+            and len(result) > 0
+        ):
+            self.utterance_language = pending_utterance_language
+            self.utterance_lang_locked_at_duration = pending_utterance_lang_duration
+            logging.info(
+                "Idioma de frase confirmado tras voz: %s (%.3fs)",
+                self.utterance_language,
+                self.utterance_lang_locked_at_duration,
+            )
+        elif pending_utterance_language is not None:
+            logging.info(
+                "Idioma candidato descartado por no_output: %s",
+                pending_utterance_language,
+            )
 
         if self.language is None and info is not None:
             self.set_language(info)
+
+        total_elapsed_s = time.perf_counter() - total_t0
+        logging.info(
+            "[TIMING] transcribe input=%.3fs lang=%s call=%.3fs total=%.3fs lock_wait=%.3fs mode=direct",
+            input_duration_s,
+            lang_for_transcribe or "auto",
+            transcribe_elapsed_s,
+            total_elapsed_s,
+            lock_wait_s,
+        )
         return result
 
     def handle_transcription_output(self, result, duration):
