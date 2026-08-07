@@ -20,7 +20,9 @@ COMMON_ARGS = [
 BACKENDS = {
     "cpu": {
         "label": "Faster-Whisper — CPU",
-        "command": ["py", "-3.12", *COMMON_ARGS, "--backend", "faster_whisper"],
+        "command": [r"C:\Whisker\venv-cpu\Scripts\python.exe",
+        *COMMON_ARGS,
+        "--backend", "faster_whisper",],
     },
     "cuda": {
         "label": "Faster-Whisper — CUDA",
