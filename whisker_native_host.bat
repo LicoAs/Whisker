@@ -1,2 +1,2 @@
 @echo off
-py -3.12 "C:\Users\Lico\WhisperLive\WhisperLive\whisker_native_host.py" %*
+py -3.12 "%~dp0whisker_native_host.py" %*
