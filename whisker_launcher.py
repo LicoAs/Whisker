@@ -53,7 +53,7 @@ def build_environment(backend):
     env = os.environ.copy()
 
     if backend == "rocm":
-        rocm_path = r"C:\Program Files\AMD\ROCm\6.2"
+        rocm_path = CONFIG["rocm_path"]
         env["ROCM_PATH"] = rocm_path
         env["HIP_PATH"] = rocm_path
         env["PATH"] = str(Path(rocm_path) / "bin") + os.pathsep + env.get("PATH", "")
