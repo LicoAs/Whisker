@@ -25,3 +25,4 @@ Audio-Transcription-Chrome/node_modules/
 Audio-Transcription-Chrome/package-lock.json
 whisper_live/backend/backups/
 com.whisker.backend.json
+whisker_config.json
