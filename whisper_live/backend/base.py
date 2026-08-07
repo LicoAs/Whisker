@@ -1,12 +1,9 @@
 import json
 import logging
-import re
 import threading
 import time
 import queue
 import numpy as np
-import torch
-from silero_vad import get_speech_timestamps, load_silero_vad
 
 from whisper_live import metrics as wl_metrics
 
@@ -41,52 +38,13 @@ class ServeClientBase(object):
     """Number of repeated outputs before considering it as a valid segment."""
     SILENCE_FLUSH_CHUNKS: int = 1
     """Number of consecutive silent (no speech) chunks before flushing pending gray text."""
+    TRAILING_SILENCE_FINALIZE_S: float = 1.5
+    """Finalize a single provisional segment once this much silence follows its reported end."""
+
+    NO_OUTPUT_OVERLAP_S: float = 0.5
+    """Keep this much audio after an empty transcription so the next pass can re-hear the boundary."""
     MIN_CHUNK_DURATION_S: float = 0.5
     """Minimum seconds of unprocessed audio required before attempting a transcribe/silence check pass. Lower = more responsive (both for real speech and for silence flush), at the cost of more frequent, smaller transcribe calls."""
-    SILENCE_TAIL_MARGIN_S: float = 1.0
-    """When a window comes back as no_output (silence), we don't discard it in full: we keep the last SILENCE_TAIL_MARGIN_S seconds unconsumed, in case speech actually started near the end of that window and this attempt just failed to catch it."""
-    SAME_OUTPUT_TAIL_MARGIN_S: float = 0.5
-    """When confirming a segment via repeated output, we don't advance timestamp_offset all
-    the way to the confirmed segment's reported end: we hold back this many seconds. Backends
-    (whisper.cpp in particular) can report segment.end a bit past where the speech actually
-    ends (trailing silence/breath folded into the segment), and advancing all the way there
-    would eat into whatever comes right after -- typically the start of the next phrase."""
-    # Cuando Whisper devuelve 2+ segmentos en una sola respuesta, los
-    # segmentos previos al ultimo se confirman DE UNA, sin pasar por el
-    # chequeo normal de "repetir el mismo texto" (same_output_threshold)
-    # -- ese chequeo es la red de seguridad que evita mostrar una
-    # alucinacion de un solo tiro. None = usar no_speech_thresh normal
-    # (comportamiento sin cambios, ej. faster_whisper). Un backend puede
-    # sobreescribir esto con un valor mas estricto para exigir mas
-    # confianza antes de tomar este atajo.
-    MULTI_SEGMENT_NO_SPEECH_THRESH: float = None
-
-    PENDING_HARD_TIMEOUT_S: float = 6.0
-    """Si un segmento pendiente (current_out) lleva mas de este tiempo sin
-    lograr confirmarse por repeticion exacta, se confirma igual a la fuerza.
-    Red de seguridad para el caso en que Whisper varia levemente el texto
-    entre llamadas (ej. puntuacion distinta sobre el mismo audio casi
-    estatico) y el contador de 'salida repetida' nunca llega al umbral,
-    dejando el chunk crecer sin limite y perdiendo contenido cuando el
-    idioma cambia."""
-
-    VAD_SPEECH_PROB_THRESHOLD: float = 0.6
-    """Umbral de probabilidad de voz del VAD (silero-vad) para considerar que
-    un chunk de audio tiene habla real. Se usa como gate ANTES de llamar a
-    Whisper: si el chunk completo no tiene voz segun este umbral, no se llama
-    al modelo y se trata igual que un resultado vacio (no_output), evitando
-    que Whisper alucine sobre silencio puro."""
-    MIN_SPEECH_DURATION_IN_CHUNK_S: float = 0.3
-    """Ademas del umbral de probabilidad, exigimos que la voz detectada dentro
-    del chunk dure al menos esto en total. Filtra ruido de sala/respiracion
-    que el VAD a veces marca como voz por una fraccion de segundo -- eso NO
-    alcanza para justificar mandarle el chunk entero a Whisper, y es la causa
-    real de alucinaciones tipo 'history.'/'test.'/'daily.' repetidas sobre
-    audio que en realidad es ruido ambiente, no habla."""
-
-    _vad_model = None
-    """Modelo de VAD compartido entre todas las instancias (se carga una sola vez)."""
-    _vad_lock = threading.Lock()
 
     MAX_TRANSCRIPT_LENGTH = 500
     MAX_TRANSLATION_QUEUE_SIZE = 100
@@ -124,7 +82,6 @@ class ServeClientBase(object):
         self.same_output_count = 0
         self.transcript = []
         self.end_time_for_same_output = None
-        self.pending_since = None
         self.translation_queue = translation_queue
 
         # Optional post-processing callable for segments.
@@ -174,15 +131,7 @@ class ServeClientBase(object):
             try:
                 input_sample = input_bytes.copy()
                 t0 = time.time()
-
-                if not self._chunk_has_speech(input_sample):
-                    # Gate de VAD: no hay voz en este chunk, no llamamos a
-                    # Whisper. Se trata igual que "no_output" (result=None),
-                    # reusando toda la logica de flush/margen ya existente.
-                    print(f"[DEBUG] VAD: sin voz detectada, se salta Whisper ({duration:.2f}s)")
-                    result = None
-                else:
-                    result = self.transcribe_audio(input_sample)
+                result = self.transcribe_audio(input_sample)
 
                 # "Sin novedad" cubre dos casos: result es None (VAD filtró
                 # el 100% del chunk, silencio puro) y result es una lista
@@ -199,19 +148,16 @@ class ServeClientBase(object):
                         if self.current_out.strip() != '' and self.silence_chunks >= self.SILENCE_FLUSH_CHUNKS:
                             self.flush_pending_on_silence(duration)
                             self.silence_chunks = 0
-                        # No tiramos toda la ventana descartada como silencio: dejamos
-                        # sin consumir los ultimos SILENCE_TAIL_MARGIN_S segundos, por si
-                        # el habla arranco justo al final de la ventana que este intento
-                        # clasifico como silencio (perdida sistematica del comienzo de
-                        # frase tras una pausa, ver notas del backend whisper.cpp/Vulkan).
-                        safe_advance = max(0.0, duration - self.SILENCE_TAIL_MARGIN_S)
-                        self.timestamp_offset += safe_advance
+
+                        advance = max(0.0, duration - self.NO_OUTPUT_OVERLAP_S)
+                        self.timestamp_offset += advance
+                        print(
+                            f"[DEBUG] no_output: duration={duration:.3f}s "
+                            f"advance={advance:.3f}s overlap={duration - advance:.3f}s"
+                        )
                     else:
-                        # self.language todavia es None pero SI hubo una transcripcion
-                        # valida este ciclo (no_output=False): no la tiremos, solo
-                        # todavia no tenemos idioma fijado para la sesion.
-                        self.handle_transcription_output(result, duration)
                         self.timestamp_offset += duration
+
                     time.sleep(0.25)    # wait for voice activity, no_output is True when no voice activity
                     continue
                 else:
@@ -240,114 +186,6 @@ class ServeClientBase(object):
         """
         pass
 
-    @classmethod
-    def _get_vad_model(cls):
-        """Carga el modelo de VAD una sola vez por proceso, la primera vez que se pide."""
-        if cls._vad_model is None:
-            with cls._vad_lock:
-                if cls._vad_model is None:
-                    cls._vad_model = load_silero_vad()
-        return cls._vad_model
-
-    def _chunk_has_speech(self, audio_chunk):
-        """
-        True si el VAD detecta voz real (no solo un pico breve de ruido) en
-        audio_chunk. Se usa como gate antes de llamar a Whisper: si esto da
-        False, no tiene sentido transcribir, y evitamos que el modelo
-        alucine sobre ruido de sala/respiracion que el VAD marca como
-        "algo" pero que dura muy poco para ser habla real.
-        """
-        model = self._get_vad_model()
-        wav = torch.from_numpy(np.asarray(audio_chunk, dtype=np.float32))
-        timestamps = get_speech_timestamps(
-            wav, model,
-            sampling_rate=self.RATE,
-            threshold=self.VAD_SPEECH_PROB_THRESHOLD,
-            return_seconds=True,
-        )
-        total_speech_s = sum(t['end'] - t['start'] for t in timestamps)
-        return total_speech_s >= self.MIN_SPEECH_DURATION_IN_CHUNK_S
-    _TRAILING_PUNCT_RE = re.compile(r'[.?!,;:]+$')
-
-    def _normalize_for_comparison(self, text):
-        """
-        Normaliza texto para decidir si es 'el mismo contenido' a los fines
-        de la deteccion de salida repetida, ignorando diferencias de
-        puntuacion final que Whisper agrega o cambia de forma inconsistente
-        entre llamadas sobre el mismo audio casi estatico (ej. 'disease?'
-        vs 'disease.'). Esto es solo para COMPARAR -- el texto que se
-        confirma y se muestra sigue siendo self.current_out tal cual, sin
-        tocar.
-        """
-        return self._TRAILING_PUNCT_RE.sub('', text.strip().lower())
-
-    _WORD_PUNCT_RE = re.compile(r'[^\w\s]')
-
-    def _normalize_word(self, w):
-        return self._WORD_PUNCT_RE.sub('', w).lower()
-
-    _WORD_PUNCT_RE = re.compile(r'[^\w\s]')
-
-    def _normalize_word(self, w):
-        return self._WORD_PUNCT_RE.sub('', w).lower()
-
-    MIN_OVERLAP_WORDS_TO_STRIP: int = 3
-    """Cantidad minima de palabras seguidas que tienen que coincidir para
-    que _strip_overlap_with_last las recorte, A MENOS que la coincidencia
-    cubra el candidato ENTERO (ahi se recorta igual, sea 1 palabra o mas --
-    es el caso de un segmento corto que es pura cola repetida, ej.
-    'numero.', 'history.'). Con solo 1-2 palabras sueltas, es mas probable
-    que sea una coincidencia natural del lenguaje (una pregunta nueva que
-    arranca con la misma palabra con la que termino la anterior, ej.
-    'Would you'/'Is someone') que audio realmente repetido -- recortarlas
-    perdia contenido real nuevo."""
-
-    def _strip_overlap_with_last(self, text):
-        """
-        Si el arranque de `text` repite, palabra por palabra, la cola de lo
-        ultimo ya confirmado, recorta esa parte repetida y devuelve el
-        resto. Esto pasa porque el margen retenido al confirmar (para no
-        comerse el arranque de la frase siguiente) puede volver a
-        transcribirse PEGADO a audio genuinamente nuevo en un solo
-        segmento. Solo recorta si la coincidencia es de varias palabras o
-        cubre el candidato entero (ver MIN_OVERLAP_WORDS_TO_STRIP) -- una
-        coincidencia de una sola palabra suelta en un candidato mas largo
-        es mas probable que sea casualidad del lenguaje que audio repetido.
-        """
-        if not self.text or not text.strip():
-            return text
-        last_words = [self._normalize_word(w) for w in self.text[-1].split()]
-        words = text.split()
-        cand_norm = [self._normalize_word(w) for w in words]
-        max_overlap = min(len(last_words), len(words))
-        for n in range(max_overlap, 0, -1):
-            if last_words[-n:] == cand_norm[:n]:
-                if n < self.MIN_OVERLAP_WORDS_TO_STRIP and n < len(words):
-                    return text
-                remainder = ' '.join(words[n:]).lstrip()
-                if remainder != text.strip():
-                    print(f"[DEBUG] recortando {n} palabra(s) duplicada(s) al arranque: '{' '.join(words[:n])}' -> queda '{remainder[:50]}'")
-                return remainder
-        return text
-
-    def _is_duplicate_tail(self, text):
-        """
-        True si `text` es redundante con lo que ya se confirmó -- es decir,
-        coincide con la cola del último segmento ya confirmado. Esto puede
-        pasar porque SAME_OUTPUT_TAIL_MARGIN_S / SILENCE_TAIL_MARGIN_S dejan
-        a proposito un poco de audio YA confirmado sin consumir (para no
-        comerse el arranque de la frase siguiente); ese resto de audio puede
-        volver a transcribirse y confirmarse solo, apareciendo como
-        duplicado en la transcripcion si no se filtra aca.
-        """
-        if not self.text:
-            return False
-        candidate = text.strip().lower()
-        if not candidate:
-            return False
-        last = self.text[-1].strip().lower()
-        return last.endswith(candidate)
-
     def flush_pending_on_silence(self, duration):
         """
         Confirma el texto gris pendiente (current_out) cuando hubo silencio
@@ -359,7 +197,7 @@ class ServeClientBase(object):
         if not self.current_out.strip():
             return
         with self.lock:
-            if not self._is_duplicate_tail(self.current_out):
+            if not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower():
                 self.text.append(self.current_out)
                 completed_segment = self.format_segment(
                     self.timestamp_offset,
@@ -378,7 +216,6 @@ class ServeClientBase(object):
         self.prev_out = ''
         self.same_output_count = 0
         self.end_time_for_same_output = None
-        self.pending_since = None
         self.on_segment_finalized()
 
     def format_segment(self, start, end, text, completed=False, speaker=None, words=None, language=None):
@@ -640,23 +477,16 @@ class ServeClientBase(object):
 
         # Process complete segments only if there are more than one
         # and if the last segment's no_speech_prob is below the threshold.
-        multi_seg_thresh = (
-            self.MULTI_SEGMENT_NO_SPEECH_THRESH
-            if self.MULTI_SEGMENT_NO_SPEECH_THRESH is not None
-            else self.no_speech_thresh
-        )
-        if len(segments) > 1 and self.get_segment_no_speech_prob(segments[-1]) <= multi_seg_thresh:
+        if len(segments) > 1 and self.get_segment_no_speech_prob(segments[-1]) <= self.no_speech_thresh:
             for s in segments[:-1]:
-                text_ = self._strip_overlap_with_last(s.text)
-                if not text_.strip():
-                    continue
+                text_ = s.text
                 self.text.append(text_)
                 with self.lock:
                     start = self.timestamp_offset + self.get_segment_start(s)
                     end = self.timestamp_offset + min(duration, self.get_segment_end(s))
                 if start >= end:
                     continue
-                if self.get_segment_no_speech_prob(s) > multi_seg_thresh:
+                if self.get_segment_no_speech_prob(s) > self.no_speech_thresh:
                     continue
                 speaker = self._identify_speaker(s)
                 words = self._extract_words(s, self.timestamp_offset)
@@ -668,129 +498,82 @@ class ServeClientBase(object):
                         self.translation_queue.put(completed_segment.copy(), timeout=0.1)
                     except queue.Full:
                         logging.warning("Translation queue is full, skipping segment")
-                # Mismo margen de seguridad que en la rama de "salida repetida":
-                # no avanzamos el offset interno hasta el .end reportado a
-                # secas, dejamos un colchon por si ahi mismo arranca la frase
-                # siguiente. El timestamp mostrado en completed_segment (arriba)
-                # queda con el end real, sin recortar -- solo se recorta lo
-                # que se usa para mover timestamp_offset.
-                offset = max(0.0, min(duration, self.get_segment_end(s)) - self.SAME_OUTPUT_TAIL_MARGIN_S)
+                offset = min(duration, self.get_segment_end(s))
 
         # Process the last segment if its no_speech_prob is acceptable.
         if self.get_segment_no_speech_prob(segments[-1]) <= self.no_speech_thresh:
-            candidate = segments[-1].text
-            stripped = self._strip_overlap_with_last(candidate)
-            if not stripped.strip() and candidate.strip():
-                # Todo el candidato era la cola ya confirmada -- no hay
-                # contenido nuevo este ciclo. Si dejamos current_out vacio
-                # sin avanzar el offset, el mismo audio se vuelve a
-                # transcribir para siempre: current_out arranca vacio cada
-                # vez, entonces la logica de "salida repetida" (que exige
-                # current_out no vacio) nunca se activa y el offset nunca
-                # avanza -- bucle infinito. Consumimos este audio ya mismo.
-                seg_end = min(duration, self.get_segment_end(segments[-1]))
-                offset = seg_end
+            self.current_out += segments[-1].text
+            words = self._extract_words(segments[-1], self.timestamp_offset)
+            with self.lock:
+                last_segment = self.format_segment(
+                    self.timestamp_offset + self.get_segment_start(segments[-1]),
+                    self.timestamp_offset + min(duration, self.get_segment_end(segments[-1])),
+                    self.current_out,
+                    completed=False,
+                    words=words,
+                    language=self.get_segment_language()
+                )
+
+        # If Whisper reports a single provisional segment followed by enough trailing
+        # silence, finalize it at Whisper's own segment end instead of waiting for an
+        # exact text repetition. This prevents old speech from pinning the processing
+        # offset while the input buffer keeps growing.
+        finalized_on_trailing_silence = False
+        if len(segments) == 1 and self.current_out.strip():
+            segment_end = min(duration, self.get_segment_end(segments[-1]))
+            trailing_silence = max(0.0, duration - segment_end)
+            if trailing_silence >= self.TRAILING_SILENCE_FINALIZE_S:
+                if not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower():
+                    self.text.append(self.current_out)
+                    with self.lock:
+                        completed_segment = self.format_segment(
+                            self.timestamp_offset + self.get_segment_start(segments[-1]),
+                            self.timestamp_offset + segment_end,
+                            self.current_out,
+                            completed=True,
+                            speaker=self._identify_speaker(segments[-1]),
+                            words=words,
+                            language=self.get_segment_language()
+                        )
+                        self.transcript.append(completed_segment)
+
+                        if self.translation_queue:
+                            try:
+                                self.translation_queue.put(completed_segment.copy(), timeout=0.1)
+                            except queue.Full:
+                                logging.warning("Translation queue is full, skipping segment")
+
+                print(
+                    f"[DEBUG] finalizado por silencio final: "
+                    f"segment_end={segment_end:.3f}s trailing={trailing_silence:.3f}s "
+                    f"texto='{self.current_out.strip()[:50]}'"
+                )
                 self.current_out = ''
                 self.prev_out = ''
                 self.same_output_count = 0
-                self.pending_since = None
                 self.end_time_for_same_output = None
-                print(f"[DEBUG] segmento entero era cola duplicada, consumiendo {seg_end:.2f}s para evitar loop")
+                offset = duration
+                last_segment = None
+                finalized_on_trailing_silence = True
+
+        # Handle repeated output logic.
+        if not finalized_on_trailing_silence:
+            if self.current_out.strip() == self.prev_out.strip() and self.current_out != '':
+                self.same_output_count += 1
+                print(f"[DEBUG] salida repetida, count={self.same_output_count} | texto='{self.current_out.strip()[:50]}'")
+
+                # if we remove the audio because of same output on the nth reptition we might remove the 
+                # audio thats not yet transcribed so, capturing the time when it was repeated for the first time
+                if self.end_time_for_same_output is None:
+                    self.end_time_for_same_output = self.get_segment_end(segments[-1])
+                time.sleep(0.1)  # wait briefly for any new voice activity
             else:
-                self.current_out += stripped
-                words = self._extract_words(segments[-1], self.timestamp_offset)
-                with self.lock:
-                    last_segment = self.format_segment(
-                        self.timestamp_offset + self.get_segment_start(segments[-1]),
-                        self.timestamp_offset + min(duration, self.get_segment_end(segments[-1])),
-                        self.current_out,
-                        completed=False,
-                        words=words,
-                        language=self.get_segment_language()
-                    )
+                self.same_output_count = 0
+                self.end_time_for_same_output = None
 
-        # Handle repeated output logic. Comparamos texto NORMALIZADO (sin
-        # puntuacion final) para que "disease?" y "disease." cuenten como
-        # la misma salida -- Whisper varia la puntuacion entre llamadas
-        # sobre el mismo audio casi estatico, y una comparacion exacta
-        # reseteaba el contador sin motivo real, dejando el chunk crecer
-        # sin limite.
-        current_norm = self._normalize_for_comparison(self.current_out)
-        prev_norm = self._normalize_for_comparison(self.prev_out)
-        if current_norm == prev_norm and self.current_out.strip() != '':
-            self.same_output_count += 1
-            print(f"[DEBUG] salida repetida, count={self.same_output_count} | texto='{self.current_out.strip()[:50]}'")
-
-            # if we remove the audio because of same output on the nth reptition we might remove the 
-            # audio thats not yet transcribed so, capturing the time when it was repeated for the first time
-            if self.end_time_for_same_output is None:
-                self.end_time_for_same_output = self.get_segment_end(segments[-1])
-            time.sleep(0.1)  # wait briefly for any new voice activity
-        else:
-            self.same_output_count = 0
-            self.end_time_for_same_output = None
-
-        # Llevamos la cuenta de hace cuanto viene creciendo este segmento
-        # pendiente sin confirmarse, para el limite de seguridad de abajo.
-        # OJO: NO se resetea solo porque una llamada puntual haya vuelto
-        # vacia (ruido normal del modelo, no_speech_prob con un pico
-        # aislado) -- eso rompia el cronometro y el limite de 6s nunca
-        # llegaba a dispararse en frases largas. Solo se resetea en los
-        # puntos donde el segmento realmente se confirma o se descarta
-        # (mas abajo en este metodo, y en flush_pending_on_silence).
-        if self.current_out.strip() != '' and self.pending_since is None:
-            self.pending_since = time.time()
-
-        pending_too_long = (
-            self.pending_since is not None
-            and (time.time() - self.pending_since) > self.PENDING_HARD_TIMEOUT_S
-        )
-        if pending_too_long:
-            print(f"[DEBUG] limite de seguridad: {self.PENDING_HARD_TIMEOUT_S}s pendiente sin confirmar, forzando confirmacion | texto='{self.current_out.strip()[:50]}'")
-            if self.end_time_for_same_output is None:
-                self.end_time_for_same_output = self.get_segment_end(segments[-1])
-
-        # If the same incomplete segment is repeated too many times,
-        # append it to the transcript and update the offset.
-        if self.same_output_count > self.same_output_threshold or pending_too_long:
-            is_dup = self._is_duplicate_tail(self.current_out)
-            if not is_dup:
-                self.text.append(self.current_out)
-                with self.lock:
-                    completed_segment = self.format_segment(
-                        self.timestamp_offset,
-                        self.timestamp_offset + min(duration, self.end_time_for_same_output),
-                        self.current_out,
-                        completed=True,
-                        language=self.get_segment_language()
-                    )
-                    self.transcript.append(completed_segment)
-
-                    if self.translation_queue:
-                        try:
-                            self.translation_queue.put(completed_segment.copy(), timeout=0.1)
-                        except queue.Full:
-                            logging.warning("Translation queue is full, skipping segment")
-
-            self.current_out = ''
-            confirmed_end = min(duration, self.end_time_for_same_output)
-            if is_dup:
-                # Ya habiamos confirmado este mismo texto antes -- esto es
-                # el margen retenido reapareciendo, no contenido nuevo.
-                # Retener margen otra vez solo reproduce el mismo audio en
-                # el proximo ciclo y genera un loop (ej. "China."/"history."
-                # repitiendose muchos segundos). Como ya sabemos que aca no
-                # hay nada nuevo por proteger, consumimos todo sin dejar
-                # margen esta vez, así el buffer avanza de una.
-                offset = confirmed_end
-                print(f"[DEBUG] cola duplicada detectada, consumiendo sin margen para cortar el loop | texto='{self.current_out.strip()[:50] if self.current_out else self.text[-1][:50] if self.text else ''}'")
-            else:
-                offset = max(0.0, confirmed_end - self.SAME_OUTPUT_TAIL_MARGIN_S)
-            self.same_output_count = 0
-            last_segment = None
-            self.end_time_for_same_output = None
-            self.pending_since = None
-        else:
+            # Experimental: repeated text is diagnostic only. Do not finalize or
+            # advance timestamp_offset from same_output; wait for either a later
+            # segment or the trailing-silence finalizer above.
             self.prev_out = self.current_out
 
         if offset is not None:

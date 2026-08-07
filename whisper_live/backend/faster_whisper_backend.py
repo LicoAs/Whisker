@@ -3,9 +3,23 @@ import json
 import logging
 import threading
 import time
-import torch
+
+# Make the ROCm 6.2 runtime visible to Python before importing CTranslate2.
+# Keep the directory handle alive for the lifetime of the process.
+ROCM_BIN = os.environ.get(
+    "ROCM_BIN",
+    r"C:\Program Files\AMD\ROCm\6.2\bin",
+)
+_ROCM_DLL_DIRECTORY = None
+
+if os.name == "nt" and os.path.isdir(ROCM_BIN):
+    os.environ["PATH"] = ROCM_BIN + os.pathsep + os.environ.get("PATH", "")
+    _ROCM_DLL_DIRECTORY = os.add_dll_directory(ROCM_BIN)
+
 import ctranslate2
+import torch
 from huggingface_hub import snapshot_download
+from silero_vad import get_speech_timestamps, load_silero_vad
 
 from whisper_live.transcriber.transcriber_faster_whisper import WhisperModel
 from whisper_live.backend.base import ServeClientBase
@@ -15,6 +29,16 @@ class ServeClientFasterWhisper(ServeClientBase):
     SINGLE_MODEL = None
     SINGLE_MODEL_LOCK = threading.Lock()
     BATCH_WORKER = None
+
+    # Experimental external Silero gate. It runs BEFORE language detection
+    # and Faster-Whisper. If it decides there is not enough speech yet,
+    # transcribe_audio() returns None and base.py handles it as no_output.
+    # The stable base currently preserves 0.5 s after no_output, which acts
+    # as the pre-roll for the next pass.
+    VAD_SPEECH_PROB_THRESHOLD = 0.6
+    MIN_SPEECH_DURATION_IN_CHUNK_S = 0.3
+    _VAD_MODEL = None
+    _VAD_MODEL_LOCK = threading.Lock()
 
     def __init__(
         self,
@@ -99,16 +123,24 @@ class ServeClientFasterWhisper(ServeClientBase):
         self.vad_parameters = vad_parameters or {"threshold": 0.3}
         self.hotwords = hotwords
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        if device == "cuda":
-            major, _ = torch.cuda.get_device_capability(device)
-            self.compute_type = "float16" if major >= 7 else "float32"
-        else:
-            self.compute_type = "int8"
+        # Detect the GPU through CTranslate2 itself. PyTorch CUDA detection is
+        # not valid for this Windows ROCm build, while CTranslate2 reports the
+        # RX 6700 XT as a CUDA-compatible device through its HIP backend.
+        if device is None:
+            device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+
+        self.compute_type = "float16" if device == "cuda" else "int8"
 
         if self.model_size_or_path is None:
             return
-        logging.info(f"Using Device={device} with precision {self.compute_type}")
+
+        logging.info(
+            "Using CTranslate2 device=%s with precision=%s "
+            "(ROCm devices detected=%d)",
+            device,
+            self.compute_type,
+            ctranslate2.get_cuda_device_count(),
+        )
     
         try:
             if single_model:
@@ -237,6 +269,63 @@ class ServeClientFasterWhisper(ServeClientBase):
     # contexto disponible que la desmiente.
     RELANG_RECHECK_MARGIN_S = 0.7
 
+    @classmethod
+    def _get_external_vad_model(cls):
+        """Load the external Silero VAD model once per process."""
+        if cls._VAD_MODEL is None:
+            with cls._VAD_MODEL_LOCK:
+                if cls._VAD_MODEL is None:
+                    cls._VAD_MODEL = load_silero_vad()
+        return cls._VAD_MODEL
+
+    def _get_external_vad_speech_duration(self, input_sample):
+        """Return total speech duration detected by the external Silero gate."""
+        wav = torch.as_tensor(input_sample, dtype=torch.float32)
+        timestamps = get_speech_timestamps(
+            wav,
+            self._get_external_vad_model(),
+            sampling_rate=self.SAMPLE_RATE,
+            threshold=self.VAD_SPEECH_PROB_THRESHOLD,
+            return_seconds=True,
+        )
+        return sum(ts["end"] - ts["start"] for ts in timestamps)
+
+    def _external_vad_should_run(self, input_sample):
+        """
+        Diagnostic gate.
+
+        Fail-open by design: if Silero itself errors, Faster-Whisper still runs.
+        """
+        chunk_duration_s = len(input_sample) / self.SAMPLE_RATE
+        vad_t0 = time.perf_counter()
+
+        try:
+            speech_duration_s = self._get_external_vad_speech_duration(input_sample)
+        except Exception as e:
+            vad_elapsed_s = time.perf_counter() - vad_t0
+            logging.warning(
+                "[VAD] chunk=%.3fs decision=RUN reason=error vad=%.3fs error=%s",
+                chunk_duration_s,
+                vad_elapsed_s,
+                e,
+            )
+            return True
+
+        vad_elapsed_s = time.perf_counter() - vad_t0
+        should_run = speech_duration_s >= self.MIN_SPEECH_DURATION_IN_CHUNK_S
+
+        logging.info(
+            "[VAD] chunk=%.3fs speech=%.3fs decision=%s threshold=%.2f "
+            "min_speech=%.3fs vad=%.3fs",
+            chunk_duration_s,
+            speech_duration_s,
+            "RUN" if should_run else "SKIP",
+            self.VAD_SPEECH_PROB_THRESHOLD,
+            self.MIN_SPEECH_DURATION_IN_CHUNK_S,
+            vad_elapsed_s,
+        )
+        return should_run
+
     def detect_restricted_language(self, input_sample, candidates=("es", "en")):
         """
         Restringe la auto-detección de idioma a un conjunto reducido de
@@ -250,11 +339,26 @@ class ServeClientFasterWhisper(ServeClientBase):
         comportamiento normal de auto-detect sin restricción, como
         fallback seguro).
         """
+        detect_t0 = time.perf_counter()
+        input_duration_s = len(input_sample) / self.SAMPLE_RATE
         try:
             _, _, all_language_probs = self.transcriber.detect_language(input_sample)
         except Exception as e:
+            detect_elapsed_s = time.perf_counter() - detect_t0
+            logging.info(
+                "[TIMING] detect_language input=%.3fs took=%.3fs error=yes",
+                input_duration_s,
+                detect_elapsed_s,
+            )
             logging.warning(f"No se pudo restringir la detección de idioma, sigo sin restricción: {e}")
             return None
+
+        detect_elapsed_s = time.perf_counter() - detect_t0
+        logging.info(
+            "[TIMING] detect_language input=%.3fs took=%.3fs error=no",
+            input_duration_s,
+            detect_elapsed_s,
+        )
 
         if not all_language_probs:
             return None
@@ -283,6 +387,16 @@ class ServeClientFasterWhisper(ServeClientBase):
             depends on the implementation of the `transcriber.transcribe` method but typically
             includes the transcribed text.
         """
+        total_t0 = time.perf_counter()
+        input_duration_s = len(input_sample) / self.SAMPLE_RATE
+
+        # External Silero gate. On SKIP we intentionally return None before
+        # restricted language detection and before Faster-Whisper. base.py's
+        # current no_output handling keeps the last 0.5 s, so the next pass
+        # re-hears the boundary instead of losing the first word.
+        if self.use_vad and not self._external_vad_should_run(input_sample):
+            return None
+
         # Si el cliente pidió un idioma fijo, se usa siempre ese.
         # Si pidió auto-detect (language_requested is None), usamos el
         # idioma ya detectado para ESTA frase si lo tenemos; si la frase
@@ -305,14 +419,22 @@ class ServeClientFasterWhisper(ServeClientBase):
         # no hay suficiente, esta vuelta se procesa sin idioma forzado
         # (auto-detect normal de Whisper) y se reintenta la próxima vuelta
         # con más audio.
+        # Si esta vuelta detecta un idioma restringido, lo usamos para ESTA
+        # inferencia pero no lo fijamos todavía como idioma de la frase.
+        # Solo se confirma después si la inferencia realmente devuelve voz.
+        # Así un bloque de silencio no puede dejar preparado un idioma falso
+        # para la intervención siguiente.
+        pending_utterance_language = None
+        pending_utterance_lang_duration = None
+
         if lang_for_transcribe is None and self.language_requested is None:
             sample_duration_s = len(input_sample) / self.SAMPLE_RATE
             if sample_duration_s >= self.MIN_DURATION_FOR_LANG_DETECTION_S:
                 restricted_lang = self.detect_restricted_language(input_sample)
                 if restricted_lang is not None:
                     lang_for_transcribe = restricted_lang
-                    self.utterance_language = restricted_lang
-                    self.utterance_lang_locked_at_duration = sample_duration_s
+                    pending_utterance_language = restricted_lang
+                    pending_utterance_lang_duration = sample_duration_s
 
         # Re-chequeo de corrección (una sola vez por frase): si ya fijamos
         # un idioma pero con poco audio pudo haberse equivocado (ej. una
@@ -347,36 +469,96 @@ class ServeClientFasterWhisper(ServeClientBase):
                 word_timestamps=self.word_timestamps,
                 client_uid=self.client_uid,
             )
+            batch_t0 = time.perf_counter()
             ServeClientFasterWhisper.BATCH_WORKER.submit(request)
             request.future.wait(timeout=30)
+            batch_elapsed_s = time.perf_counter() - batch_t0
             if request.error:
                 raise request.error
-            if self.language_requested is None and self.utterance_language is None and request.info is not None:
-                self.utterance_language = request.info.language
+            if (
+                pending_utterance_language is not None
+                and request.result is not None
+                and len(request.result) > 0
+            ):
+                self.utterance_language = pending_utterance_language
+                self.utterance_lang_locked_at_duration = pending_utterance_lang_duration
+                logging.info(
+                    "Idioma de frase confirmado tras voz: %s (%.3fs)",
+                    self.utterance_language,
+                    self.utterance_lang_locked_at_duration,
+                )
+            elif pending_utterance_language is not None:
+                logging.info(
+                    "Idioma candidato descartado por no_output: %s",
+                    pending_utterance_language,
+                )
+
             if self.language is None and request.info is not None:
                 self.set_language(request.info)
+
+            total_elapsed_s = time.perf_counter() - total_t0
+            logging.info(
+                "[TIMING] transcribe input=%.3fs lang=%s call=%.3fs total=%.3fs mode=batch",
+                input_duration_s,
+                lang_for_transcribe or "auto",
+                batch_elapsed_s,
+                total_elapsed_s,
+            )
             return request.result
 
         # Original lock-based path (backward compatible)
+        lock_wait_s = 0.0
         if ServeClientFasterWhisper.SINGLE_MODEL:
+            lock_t0 = time.perf_counter()
             ServeClientFasterWhisper.SINGLE_MODEL_LOCK.acquire()
-        result, info = self.transcriber.transcribe(
-            input_sample,
-            initial_prompt=self.initial_prompt,
-            language=lang_for_transcribe,
-            task=self.task,
-            vad_filter=self.use_vad,
-            vad_parameters=self.vad_parameters if self.use_vad else None,
-            hotwords=self.hotwords,
-            word_timestamps=self.word_timestamps)
-        if ServeClientFasterWhisper.SINGLE_MODEL:
-            ServeClientFasterWhisper.SINGLE_MODEL_LOCK.release()
+            lock_wait_s = time.perf_counter() - lock_t0
 
-        if self.language_requested is None and self.utterance_language is None and info is not None:
-            self.utterance_language = info.language
+        transcribe_t0 = time.perf_counter()
+        try:
+            result, info = self.transcriber.transcribe(
+                input_sample,
+                initial_prompt=self.initial_prompt,
+                language=lang_for_transcribe,
+                task=self.task,
+                vad_filter=self.use_vad,
+                vad_parameters=self.vad_parameters if self.use_vad else None,
+                hotwords=self.hotwords,
+                word_timestamps=self.word_timestamps)
+        finally:
+            transcribe_elapsed_s = time.perf_counter() - transcribe_t0
+            if ServeClientFasterWhisper.SINGLE_MODEL:
+                ServeClientFasterWhisper.SINGLE_MODEL_LOCK.release()
+
+        if (
+            pending_utterance_language is not None
+            and result is not None
+            and len(result) > 0
+        ):
+            self.utterance_language = pending_utterance_language
+            self.utterance_lang_locked_at_duration = pending_utterance_lang_duration
+            logging.info(
+                "Idioma de frase confirmado tras voz: %s (%.3fs)",
+                self.utterance_language,
+                self.utterance_lang_locked_at_duration,
+            )
+        elif pending_utterance_language is not None:
+            logging.info(
+                "Idioma candidato descartado por no_output: %s",
+                pending_utterance_language,
+            )
 
         if self.language is None and info is not None:
             self.set_language(info)
+
+        total_elapsed_s = time.perf_counter() - total_t0
+        logging.info(
+            "[TIMING] transcribe input=%.3fs lang=%s call=%.3fs total=%.3fs lock_wait=%.3fs mode=direct",
+            input_duration_s,
+            lang_for_transcribe or "auto",
+            transcribe_elapsed_s,
+            total_elapsed_s,
+            lock_wait_s,
+        )
         return result
 
     def handle_transcription_output(self, result, duration):
