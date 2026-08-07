@@ -26,6 +26,7 @@ from whisper_live.backend.base import ServeClientBase
 
 
 class ServeClientFasterWhisper(ServeClientBase):
+    NO_OUTPUT_SLEEP_S = 0.10
     SINGLE_MODEL = None
     SINGLE_MODEL_LOCK = threading.Lock()
     BATCH_WORKER = None
@@ -118,6 +119,13 @@ class ServeClientFasterWhisper(ServeClientBase):
         # primera detección se equivocó con una palabra corta/ambigua.
         self.utterance_lang_locked_at_duration = None
         self.utterance_lang_rechecked = False
+
+        # Diagnostic-only latency marker. When Silero first sees enough speech
+        # for the current utterance, we estimate when that speech actually
+        # started inside the buffered chunk. The marker is cleared after the
+        # first transcription payload is sent to the client.
+        self._latency_pending_speech_started_at = None
+
         self.task = task
         self.initial_prompt = initial_prompt
         self.vad_parameters = vad_parameters or {"threshold": 0.3}
@@ -278,8 +286,8 @@ class ServeClientFasterWhisper(ServeClientBase):
                     cls._VAD_MODEL = load_silero_vad()
         return cls._VAD_MODEL
 
-    def _get_external_vad_speech_duration(self, input_sample):
-        """Return total speech duration detected by the external Silero gate."""
+    def _get_external_vad_speech_stats(self, input_sample):
+        """Return total speech duration and first speech start detected by Silero."""
         wav = torch.as_tensor(input_sample, dtype=torch.float32)
         timestamps = get_speech_timestamps(
             wav,
@@ -288,7 +296,11 @@ class ServeClientFasterWhisper(ServeClientBase):
             threshold=self.VAD_SPEECH_PROB_THRESHOLD,
             return_seconds=True,
         )
-        return sum(ts["end"] - ts["start"] for ts in timestamps)
+
+        speech_duration_s = sum(ts["end"] - ts["start"] for ts in timestamps)
+        first_speech_start_s = timestamps[0]["start"] if timestamps else None
+
+        return speech_duration_s, first_speech_start_s
 
     def _external_vad_should_run(self, input_sample):
         """
@@ -300,7 +312,9 @@ class ServeClientFasterWhisper(ServeClientBase):
         vad_t0 = time.perf_counter()
 
         try:
-            speech_duration_s = self._get_external_vad_speech_duration(input_sample)
+            speech_duration_s, first_speech_start_s = self._get_external_vad_speech_stats(
+                input_sample
+            )
         except Exception as e:
             vad_elapsed_s = time.perf_counter() - vad_t0
             logging.warning(
@@ -313,6 +327,27 @@ class ServeClientFasterWhisper(ServeClientBase):
 
         vad_elapsed_s = time.perf_counter() - vad_t0
         should_run = speech_duration_s >= self.MIN_SPEECH_DURATION_IN_CHUNK_S
+
+        if (
+            should_run
+            and first_speech_start_s is not None
+            and self._latency_pending_speech_started_at is None
+        ):
+            # The chunk already existed when this VAD pass started. Estimate
+            # the wall-clock speech onset by rewinding from the chunk end to
+            # Silero's first detected speech timestamp.
+            seconds_from_speech_start_to_chunk_end = max(
+                0.0,
+                chunk_duration_s - first_speech_start_s,
+            )
+            self._latency_pending_speech_started_at = (
+                vad_t0 - seconds_from_speech_start_to_chunk_end
+            )
+            logging.info(
+                "[LATENCY] speech_start_detected chunk=%.3fs first_speech_at=%.3fs",
+                chunk_duration_s,
+                first_speech_start_s,
+            )
 
         logging.info(
             "[VAD] chunk=%.3fs speech=%.3fs decision=%s threshold=%.2f "
@@ -569,6 +604,8 @@ class ServeClientFasterWhisper(ServeClientBase):
             result (str): The result from whisper inference i.e. the list of segments.
             duration (float): Duration of the transcribed audio chunk.
         """
+        latency_speech_started_at = self._latency_pending_speech_started_at
+
         segments = []
         if len(result):
             self.t_start = None
@@ -577,3 +614,22 @@ class ServeClientFasterWhisper(ServeClientBase):
 
         if len(segments):
             self.send_transcription_to_client(segments)
+
+            if latency_speech_started_at is not None:
+                speech_to_first_text_s = (
+                    time.perf_counter() - latency_speech_started_at
+                )
+                logging.info(
+                    "[LATENCY] speech_to_first_text_sent=%.3fs chunk=%.3fs",
+                    speech_to_first_text_s,
+                    duration,
+                )
+
+                # Clear only the marker that produced this measurement. This
+                # keeps the instrumentation safe even if another speech marker
+                # were to appear before this send completes.
+                if (
+                    self._latency_pending_speech_started_at
+                    == latency_speech_started_at
+                ):
+                    self._latency_pending_speech_started_at = None

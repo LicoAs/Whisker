@@ -158,7 +158,7 @@ class ServeClientBase(object):
                     else:
                         self.timestamp_offset += duration
 
-                    time.sleep(0.25)    # wait for voice activity, no_output is True when no voice activity
+                    time.sleep(getattr(self, "NO_OUTPUT_SLEEP_S", 0.25))    # wait for voice activity, no_output is True when no voice activity
                     continue
                 else:
                     self.silence_chunks = 0

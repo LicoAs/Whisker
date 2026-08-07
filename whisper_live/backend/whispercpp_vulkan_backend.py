@@ -34,6 +34,7 @@ class ServeClientWhisperCppVulkan(ServeClientBase):
     # tocar el valor compartido que usa faster_whisper (que sí funciona bien
     # en 0.5s). A ajustar con más pruebas reales.
     MIN_CHUNK_DURATION_S = 1.5
+    NO_OUTPUT_OVERLAP_S = 1.0
 
     # Mismos valores/semántica que en faster_whisper_backend.py, para
     # mantener el comportamiento de auto-detección de idioma idéntico.
