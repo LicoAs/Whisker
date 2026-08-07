@@ -41,7 +41,7 @@ BACKENDS = {
     "rocm": {
         "label": "Faster-Whisper — ROCm",
         "command": [
-            r"C:\Whisker\venv-rocm62\Scripts\python.exe",
+            CONFIG["rocm_python"],
             *COMMON_ARGS,
             "--backend", "faster_whisper",
         ],
