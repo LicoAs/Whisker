@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\Lico\WhisperLive\WhisperLive")
+ROOT = Path(__file__).resolve().parent
 
 VULKAN_ROOT = Path(r"C:\whisper-vulkan-test")
 VULKAN_SERVER = VULKAN_ROOT / "whisper-server.exe"
