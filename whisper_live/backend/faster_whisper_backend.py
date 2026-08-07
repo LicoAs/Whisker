@@ -17,7 +17,9 @@ if os.name == "nt" and os.path.isdir(ROCM_BIN):
     _ROCM_DLL_DIRECTORY = os.add_dll_directory(ROCM_BIN)
 
 import ctranslate2
+import torch
 from huggingface_hub import snapshot_download
+from silero_vad import get_speech_timestamps, load_silero_vad
 
 from whisper_live.transcriber.transcriber_faster_whisper import WhisperModel
 from whisper_live.backend.base import ServeClientBase
@@ -27,6 +29,16 @@ class ServeClientFasterWhisper(ServeClientBase):
     SINGLE_MODEL = None
     SINGLE_MODEL_LOCK = threading.Lock()
     BATCH_WORKER = None
+
+    # Experimental external Silero gate. It runs BEFORE language detection
+    # and Faster-Whisper. If it decides there is not enough speech yet,
+    # transcribe_audio() returns None and base.py handles it as no_output.
+    # The stable base currently preserves 0.5 s after no_output, which acts
+    # as the pre-roll for the next pass.
+    VAD_SPEECH_PROB_THRESHOLD = 0.6
+    MIN_SPEECH_DURATION_IN_CHUNK_S = 0.3
+    _VAD_MODEL = None
+    _VAD_MODEL_LOCK = threading.Lock()
 
     def __init__(
         self,
@@ -257,6 +269,63 @@ class ServeClientFasterWhisper(ServeClientBase):
     # contexto disponible que la desmiente.
     RELANG_RECHECK_MARGIN_S = 0.7
 
+    @classmethod
+    def _get_external_vad_model(cls):
+        """Load the external Silero VAD model once per process."""
+        if cls._VAD_MODEL is None:
+            with cls._VAD_MODEL_LOCK:
+                if cls._VAD_MODEL is None:
+                    cls._VAD_MODEL = load_silero_vad()
+        return cls._VAD_MODEL
+
+    def _get_external_vad_speech_duration(self, input_sample):
+        """Return total speech duration detected by the external Silero gate."""
+        wav = torch.as_tensor(input_sample, dtype=torch.float32)
+        timestamps = get_speech_timestamps(
+            wav,
+            self._get_external_vad_model(),
+            sampling_rate=self.SAMPLE_RATE,
+            threshold=self.VAD_SPEECH_PROB_THRESHOLD,
+            return_seconds=True,
+        )
+        return sum(ts["end"] - ts["start"] for ts in timestamps)
+
+    def _external_vad_should_run(self, input_sample):
+        """
+        Diagnostic gate.
+
+        Fail-open by design: if Silero itself errors, Faster-Whisper still runs.
+        """
+        chunk_duration_s = len(input_sample) / self.SAMPLE_RATE
+        vad_t0 = time.perf_counter()
+
+        try:
+            speech_duration_s = self._get_external_vad_speech_duration(input_sample)
+        except Exception as e:
+            vad_elapsed_s = time.perf_counter() - vad_t0
+            logging.warning(
+                "[VAD] chunk=%.3fs decision=RUN reason=error vad=%.3fs error=%s",
+                chunk_duration_s,
+                vad_elapsed_s,
+                e,
+            )
+            return True
+
+        vad_elapsed_s = time.perf_counter() - vad_t0
+        should_run = speech_duration_s >= self.MIN_SPEECH_DURATION_IN_CHUNK_S
+
+        logging.info(
+            "[VAD] chunk=%.3fs speech=%.3fs decision=%s threshold=%.2f "
+            "min_speech=%.3fs vad=%.3fs",
+            chunk_duration_s,
+            speech_duration_s,
+            "RUN" if should_run else "SKIP",
+            self.VAD_SPEECH_PROB_THRESHOLD,
+            self.MIN_SPEECH_DURATION_IN_CHUNK_S,
+            vad_elapsed_s,
+        )
+        return should_run
+
     def detect_restricted_language(self, input_sample, candidates=("es", "en")):
         """
         Restringe la auto-detección de idioma a un conjunto reducido de
@@ -320,6 +389,13 @@ class ServeClientFasterWhisper(ServeClientBase):
         """
         total_t0 = time.perf_counter()
         input_duration_s = len(input_sample) / self.SAMPLE_RATE
+
+        # External Silero gate. On SKIP we intentionally return None before
+        # restricted language detection and before Faster-Whisper. base.py's
+        # current no_output handling keeps the last 0.5 s, so the next pass
+        # re-hears the boundary instead of losing the first word.
+        if self.use_vad and not self._external_vad_should_run(input_sample):
+            return None
 
         # Si el cliente pidió un idioma fijo, se usa siempre ese.
         # Si pidió auto-detect (language_requested is None), usamos el
