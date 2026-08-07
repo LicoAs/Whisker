@@ -1,0 +1,9 @@
+{
+    "name": "com.whisker.backend",
+    "description": "Whisker backend launcher",
+    "path": "C:\\Users\\Lico\\WhisperLive\\WhisperLive\\whisker_native_host.bat",
+    "type": "stdio",
+    "allowed_origins": [
+        "chrome-extension://hepiihodjhhcipepoandnpddpipflagf/"
+    ]
+}

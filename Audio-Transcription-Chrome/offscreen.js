@@ -39,6 +39,18 @@ function generateUUID() {
   return uuid;
 }
 
+function getDeviceForBackend(backend) {
+  if (backend === "cpu") {
+    return "cpu";
+  }
+
+  if (backend === "cuda" || backend === "rocm") {
+    return "cuda";
+  }
+
+  return null;
+}
+
 let audioContext = null;
 let preNode = null;
 let socket = null;
@@ -58,6 +70,7 @@ async function initAudioWorklet(stream, keepPlayback) {
   const mediaStream = audioContext.createMediaStreamSource(stream);
 
   mediaStream.connect(preNode);
+
   // Con "tab" hay que reconectar a destination porque Chrome silencia la
   // pestaña original al capturarla (si no, no se escucharía nada). Con
   // "desktop" (getDisplayMedia) el audio original sigue sonando solo,
@@ -65,6 +78,7 @@ async function initAudioWorklet(stream, keepPlayback) {
   if (keepPlayback) {
     preNode.connect(audioContext.destination);
   }
+
   preNode.port.onmessage = (event) => {
     const audio16k = event.data; // Float32Array @ 16 kHz
     if (socket && socket.readyState === WebSocket.OPEN && isServerReady) {
@@ -79,10 +93,12 @@ function cleanupAudio() {
     preNode.disconnect();
     preNode = null;
   }
+
   if (audioContext) {
     audioContext.close();
     audioContext = null;
   }
+
   if (currentStream) {
     currentStream.getTracks().forEach(track => track.stop());
     currentStream = null;
@@ -92,14 +108,23 @@ function cleanupAudio() {
 // En vez de tocar el DOM (acá no hay UI visible), avisamos el estado
 // por mensaje para que options.js actualice el cartel.
 function reportStatus(text, color = "gray") {
-  chrome.runtime.sendMessage({ type: "status-update", text, color });
+  chrome.runtime.sendMessage({
+    type: "status-update",
+    text,
+    color,
+  });
 }
 
 async function startRecord(option) {
-  chrome.runtime.sendMessage({ type: "capturing-state", isCapturing: true });
+  chrome.runtime.sendMessage({
+    type: "capturing-state",
+    isCapturing: true,
+  });
+
   reportStatus("conectando...", "yellow");
 
   let stream;
+
   try {
     stream = option.sourceType === "desktop"
       ? await captureDesktopAudio()
@@ -114,13 +139,17 @@ async function startRecord(option) {
 
   if (stream) {
     currentStream = stream;
+
     stream.oninactive = () => {
       cleanupAudio();
       reportStatus("desconectado", "red");
     };
 
     try {
-      await initAudioWorklet(stream, option.sourceType !== "desktop");
+      await initAudioWorklet(
+        stream,
+        option.sourceType !== "desktop"
+      );
     } catch (error) {
       console.error("Failed to initialize AudioWorklet:", error);
       reportStatus("error al iniciar el audio", "red");
@@ -130,29 +159,50 @@ async function startRecord(option) {
     const wsUrl = option.port
       ? `ws://${option.host}:${option.port}/`
       : `wss://${option.host}/ws`;
+
     socket = new WebSocket(wsUrl);
     isServerReady = false;
+
     let language = option.language;
 
     socket.onopen = function () {
-      reportStatus("conectado, esperando servidor...", "yellow");
+      reportStatus(
+        "conectado, esperando servidor...",
+        "yellow"
+      );
+
+      const initMessage = {
+        uid: uuid,
+        language: option.language,
+        task: option.task,
+        model: option.modelSize,
+        use_vad: option.useVad,
+      };
+
+      const device = getDeviceForBackend(option.backend);
+
+      if (device !== null) {
+        initMessage.device = device;
+      }
+
       socket.send(
-        JSON.stringify({
-          uid: uuid,
-          language: option.language,
-          task: option.task,
-          model: option.modelSize,
-          use_vad: option.useVad,
-        })
+        JSON.stringify(initMessage)
       );
     };
 
     socket.onmessage = async (event) => {
       const data = JSON.parse(event.data);
-      if (data["uid"] !== uuid) return;
+
+      if (data["uid"] !== uuid) {
+        return;
+      }
 
       if (data["status"] === "WAIT") {
-        reportStatus("servidor ocupado: " + data["message"], "yellow");
+        reportStatus(
+          "servidor ocupado: " + data["message"],
+          "yellow"
+        );
+
         stopCaptureFlow();
         return;
       }
@@ -160,9 +210,13 @@ async function startRecord(option) {
       if (isServerReady === false) {
         isServerReady = true;
         reportStatus("escuchando", "green");
+
         // La creación de la pestaña de transcript la pedimos a background.js,
         // porque desde el offscreen document no conviene manejar pestañas.
-        chrome.runtime.sendMessage({ type: "open-transcript-tab" });
+        chrome.runtime.sendMessage({
+          type: "open-transcript-tab",
+        });
+
         return;
       }
 
@@ -172,8 +226,15 @@ async function startRecord(option) {
       }
 
       if (data["message"] === "DISCONNECT") {
-        reportStatus("desconectado por el servidor", "red");
-        chrome.runtime.sendMessage({ type: "capture-stopped" });
+        reportStatus(
+          "desconectado por el servidor",
+          "red"
+        );
+
+        chrome.runtime.sendMessage({
+          type: "capture-stopped",
+        });
+
         return;
       }
 
@@ -197,13 +258,22 @@ async function startRecord(option) {
 }
 
 function stopCaptureFlow() {
-  chrome.runtime.sendMessage({ type: "capturing-state", isCapturing: false });
+  chrome.runtime.sendMessage({
+    type: "capturing-state",
+    isCapturing: false,
+  });
+
   if (socket) {
     socket.close();
     socket = null;
   }
+
   cleanupAudio();
-  chrome.runtime.sendMessage({ type: "capture-stopped" });
+
+  chrome.runtime.sendMessage({
+    type: "capture-stopped",
+  });
+
   reportStatus("desconectado", "red");
 }
 

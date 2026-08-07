@@ -9,12 +9,14 @@
     "background": {
         "service_worker": "background.js"
     },
+
     "web_accessible_resources": [
         {
-        "resources": ["audiopreprocessor.js"],
-        "matches": ["<all_urls>"]
+            "resources": ["audiopreprocessor.js"],
+            "matches": ["<all_urls>"]
         }
     ],
+
     "permissions": [
         "storage",
         "activeTab",
@@ -22,11 +24,14 @@
         "scripting",
         "offscreen",
         "tabs",
-        "desktopCapture"
+        "desktopCapture",
+        "nativeMessaging"
     ],
+
     "icons": {
-        "128":"icon128.png"
-        },
+        "128": "icon128.png"
+    },
+
     "action": {
         "default_icon": "icon128.png"
     }
