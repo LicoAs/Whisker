@@ -528,11 +528,3 @@ device="cuda"
 This configuration successfully runs Faster-Whisper with CTranslate2 4.7.1 and ROCm 6.2 on Windows using an AMD Radeon RX 6700 XT.
 
 The setup was validated through both offline transcription and live WhisperLive transcription with confirmed GPU utilization.
-
-
-Guardalo. Después, desde la consola, ejecutá:
-
-```bat
-git add docs\ROCM_WINDOWS_RDNA2.md
-git commit -m "Add ROCm 6.2 RDNA2 build guide"
-git push
