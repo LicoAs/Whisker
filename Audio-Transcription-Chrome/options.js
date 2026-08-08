@@ -19,16 +19,36 @@ function getStreamIdForTab(tabId) {
 
 const SYSTEM_AUDIO_VALUE = "__system_audio__";
 const NATIVE_HOST_NAME = "com.whisker.backend";
-const CARD_FADE_DURATION = 180;
 const WINDOW_RESIZE_DURATION = 620;
 const CONFIGURATION_RESIZE_DURATION = 360;
+const CONFIGURATION_OVERFLOW_GRACE = 80;
 const CONFIGURATION_HEADING_GAP = 18;
+const OPTIONS_FALLBACK_CONTENT_WIDTH = 420;
+const COMPACT_BODY_HORIZONTAL_PADDING = 32;
+const COMPACT_BODY_VERTICAL_PADDING = 48;
+const COMPACT_CARD_HORIZONTAL_INSET = 38;
+const COMPACT_SESSION_HEADING_GAP = 12;
+const COMPACT_TOGGLE_ROW_GAP = 24;
+const SWEET_SPOT_WIDTH_BUFFER = 19;
+const WINDOW_FIT_TOLERANCE = 2;
+const BACKEND_INDICATOR_TEXT_DELAY = 150;
+const BACKEND_INDICATOR_MOTION_DURATION = 300;
+const DELAYED_TOOLTIP_DELAY = 1500;
+const TOOLTIP_VIEWPORT_MARGIN = 12;
+const TOOLTIP_ANCHOR_GAP = 8;
 
 let expandedWindowBounds = null;
 let captureViewVersion = 0;
-let captureViewTimer = null;
+let captureViewIsCapturing = false;
 let windowResizeFrame = null;
+let windowResizeAnimationVersion = 0;
 let expansionAnimations = [];
+let detachedCaptureCards = [];
+let configurationOverflowTimer = null;
+let backendIndicatorTextTimer = null;
+let backendIndicatorMotionTimer = null;
+let delayedTooltipTimer = null;
+let delayedTooltipAnchor = null;
 
 function cancelExpansionAnimations() {
     expansionAnimations.forEach((animation) => {
@@ -36,6 +56,181 @@ function cancelExpansionAnimations() {
     });
 
     expansionAnimations = [];
+}
+
+function endConfigurationResizeMask() {
+    if (configurationOverflowTimer) {
+        clearTimeout(configurationOverflowTimer);
+        configurationOverflowTimer = null;
+    }
+
+    document.body.classList.remove(
+        "configuration-resizing"
+    );
+
+    const configurationToggle =
+        document.getElementById("configurationToggle");
+
+    if (configurationToggle) {
+        configurationToggle.dataset.animating = "false";
+    }
+}
+
+function beginConfigurationResizeMask() {
+    endConfigurationResizeMask();
+
+    document.body.classList.add(
+        "configuration-resizing"
+    );
+
+    configurationOverflowTimer = setTimeout(
+        endConfigurationResizeMask,
+        CONFIGURATION_RESIZE_DURATION +
+            CONFIGURATION_OVERFLOW_GRACE
+    );
+}
+
+function clearDetachedCaptureCards() {
+    detachedCaptureCards.forEach((element) => {
+        [
+            "display",
+            "position",
+            "top",
+            "left",
+            "width",
+            "height",
+            "margin",
+            "z-index",
+            "pointer-events",
+            "will-change",
+        ].forEach((property) => {
+            element.style.removeProperty(property);
+        });
+    });
+
+    detachedCaptureCards = [];
+}
+
+function detachCaptureCardsForCollapse() {
+    const cardDefinitions = [
+        {
+            element: document.querySelector(".app-header"),
+            distance: 90,
+            delay: 170,
+        },
+        {
+            element: document.querySelector(".source-card"),
+            distance: 130,
+            delay: 100,
+        },
+        {
+            element: document.querySelector(
+                ".configuration-card"
+            ),
+            distance: 170,
+            delay: 30,
+        },
+    ].filter(({ element }) => Boolean(element));
+
+    const snapshots = cardDefinitions.map((definition) => ({
+        ...definition,
+        rect: definition.element.getBoundingClientRect(),
+    }));
+
+    snapshots.forEach(({ element, rect }) => {
+        element.style.display = "block";
+        element.style.position = "fixed";
+        element.style.top = `${rect.top}px`;
+        element.style.left = `${rect.left}px`;
+        element.style.width = `${rect.width}px`;
+        element.style.height = `${rect.height}px`;
+        element.style.margin = "0";
+        element.style.zIndex = "10";
+        element.style.pointerEvents = "none";
+        element.style.willChange = "transform, opacity";
+    });
+
+    detachedCaptureCards = snapshots.map(
+        ({ element }) => element
+    );
+
+    return snapshots;
+}
+
+function getExpandedContentWindowHeight() {
+    const appShell = document.querySelector(".app-shell");
+
+    if (!appShell) {
+        return 0;
+    }
+
+    const bodyStyles = window.getComputedStyle(document.body);
+    const expandedPaddingTop = parseFloat(
+        bodyStyles.getPropertyValue(
+            "--expanded-body-padding-top"
+        )
+    );
+    const expandedPaddingBottom = parseFloat(
+        bodyStyles.getPropertyValue(
+            "--expanded-body-padding-bottom"
+        )
+    );
+    const windowFrameHeight = Math.max(
+        0,
+        window.outerHeight - window.innerHeight
+    );
+
+    return Math.ceil(
+        appShell.getBoundingClientRect().height +
+        (Number.isFinite(expandedPaddingTop)
+            ? expandedPaddingTop
+            : parseFloat(bodyStyles.paddingTop)) +
+        (Number.isFinite(expandedPaddingBottom)
+            ? expandedPaddingBottom
+            : parseFloat(bodyStyles.paddingBottom)) +
+        windowFrameHeight +
+        WINDOW_FIT_TOLERANCE
+    );
+}
+
+function getCompactContentWindowHeight() {
+    const sessionCard =
+        document.querySelector(".session-card");
+
+    if (!sessionCard) {
+        return 0;
+    }
+
+    const windowFrameHeight = Math.max(
+        0,
+        window.outerHeight - window.innerHeight
+    );
+
+    return Math.ceil(
+        sessionCard.getBoundingClientRect().height +
+        COMPACT_BODY_VERTICAL_PADDING +
+        windowFrameHeight +
+        WINDOW_FIT_TOLERANCE
+    );
+}
+
+function clearSessionExpansionStyles() {
+    const sessionCard =
+        document.querySelector(".session-card");
+
+    if (!sessionCard) {
+        return;
+    }
+
+    [
+        "transform",
+        "position",
+        "z-index",
+        "will-change",
+        "opacity",
+    ].forEach((property) => {
+        sessionCard.style.removeProperty(property);
+    });
 }
 
 function easeInOutCubic(progress) {
@@ -52,16 +247,25 @@ function animateWindowSize(
     toBounds,
     stateVersion,
     onComplete,
-    duration = WINDOW_RESIZE_DURATION
+    duration = WINDOW_RESIZE_DURATION,
+    onProgress
 ) {
     if (windowResizeFrame) {
         cancelAnimationFrame(windowResizeFrame);
     }
 
+    const animationVersion =
+        ++windowResizeAnimationVersion;
+
     const startedAt = performance.now();
+    let latestAppliedProgress = -1;
 
     function updateFrame(now) {
-        if (stateVersion !== captureViewVersion) {
+        if (
+            stateVersion !== captureViewVersion ||
+            animationVersion !==
+                windowResizeAnimationVersion
+        ) {
             return;
         }
 
@@ -71,6 +275,7 @@ function animateWindowSize(
         );
 
         const easedProgress = easeInOutCubic(progress);
+
         const width = Math.round(
             fromBounds.width +
             (toBounds.width - fromBounds.width) *
@@ -85,7 +290,29 @@ function animateWindowSize(
         chrome.windows.update(
             windowId,
             { width, height },
-            () => void chrome.runtime.lastError
+            () => {
+                const updateError =
+                    chrome.runtime.lastError;
+
+                if (
+                    stateVersion !== captureViewVersion ||
+                    animationVersion !==
+                        windowResizeAnimationVersion ||
+                    easedProgress < latestAppliedProgress
+                ) {
+                    return;
+                }
+
+                latestAppliedProgress = easedProgress;
+
+                if (!updateError && onProgress) {
+                    onProgress(easedProgress);
+                }
+
+                if (progress === 1 && onComplete) {
+                    onComplete();
+                }
+            }
         );
 
         if (progress < 1) {
@@ -95,10 +322,6 @@ function animateWindowSize(
         }
 
         windowResizeFrame = null;
-
-        if (onComplete) {
-            onComplete();
-        }
     }
 
     windowResizeFrame =
@@ -108,7 +331,9 @@ function animateWindowSize(
 function resizeOptionsWindow(
     isCapturing,
     stateVersion,
-    onComplete
+    onComplete,
+    onProgress,
+    targetExpandedHeight = 0
 ) {
 
     if (
@@ -151,31 +376,12 @@ function resizeOptionsWindow(
                     return;
                 }
 
-                const sessionCard =
-                    document.querySelector(".session-card");
+                const compactHeight =
+                    getCompactContentWindowHeight();
 
-                if (!sessionCard) {
+                if (!compactHeight) {
                     return;
                 }
-
-                const bodyStyles =
-                    window.getComputedStyle(document.body);
-
-                const verticalPadding =
-                    parseFloat(bodyStyles.paddingTop) +
-                    parseFloat(bodyStyles.paddingBottom);
-
-                const windowFrameHeight = Math.max(
-                    0,
-                    window.outerHeight - window.innerHeight
-                );
-
-                const compactHeight = Math.ceil(
-                    sessionCard.getBoundingClientRect().height +
-                    verticalPadding +
-                    windowFrameHeight +
-                    2
-                );
 
                 animateWindowSize(
                     currentWindow.id,
@@ -188,21 +394,29 @@ function resizeOptionsWindow(
                         height: compactHeight,
                     },
                     stateVersion,
-                    onComplete
+                    onComplete,
+                    WINDOW_RESIZE_DURATION,
+                    onProgress
                 );
             });
 
             return;
         }
 
-        if (!expandedWindowBounds) {
-            if (onComplete) {
-                onComplete();
-            }
-            return;
-        }
-
-        const boundsToRestore = expandedWindowBounds;
+        const available = getAvailableScreenBounds();
+        const storedExpandedBounds = expandedWindowBounds || {
+            width: currentWindow.width,
+            height: currentWindow.height,
+        };
+        const boundsToRestore = {
+            ...storedExpandedBounds,
+            height: Math.min(
+                targetExpandedHeight > 0
+                    ? targetExpandedHeight
+                    : storedExpandedBounds.height,
+                available.height
+            ),
+        };
         expandedWindowBounds = null;
 
         animateWindowSize(
@@ -213,106 +427,134 @@ function resizeOptionsWindow(
             },
             boundsToRestore,
             stateVersion,
-            onComplete
+            onComplete,
+            WINDOW_RESIZE_DURATION,
+            onProgress
         );
     });
 }
 
 function setCaptureView(isCapturing) {
-    const stateVersion = ++captureViewVersion;
-
-    if (captureViewTimer) {
-        clearTimeout(captureViewTimer);
-        captureViewTimer = null;
+    if (isCapturing === captureViewIsCapturing) {
+        return;
     }
+
+    captureViewIsCapturing = isCapturing;
+
+    endConfigurationResizeMask();
+
+    const stateVersion = ++captureViewVersion;
 
     if (windowResizeFrame) {
         cancelAnimationFrame(windowResizeFrame);
         windowResizeFrame = null;
     }
 
+    windowResizeAnimationVersion += 1;
+
     cancelExpansionAnimations();
+    clearDetachedCaptureCards();
+    clearSessionExpansionStyles();
 
     if (isCapturing) {
+        const sessionCard =
+            document.querySelector(".session-card");
+
         document.body.classList.remove("capture-expanding");
         document.body.classList.remove("capture-collapsing");
+        document.body.classList.remove("capture-collapsed");
+        document.body.classList.remove("capture-active");
+
+        if (sessionCard) {
+            document.body.style.setProperty(
+                "--session-card-locked-width",
+                `${sessionCard.getBoundingClientRect().width}px`
+            );
+        }
+
+        const expandedSessionTop = sessionCard
+            ? sessionCard.getBoundingClientRect().top
+            : 0;
+
+        const risingCards =
+            detachCaptureCardsForCollapse();
+
         document.body.classList.add("capture-active");
+        document.body.classList.add("capture-collapsing");
+        document.body.classList.add("capture-collapsed");
 
-        captureViewTimer = setTimeout(() => {
-            if (stateVersion !== captureViewVersion) {
-                return;
-            }
+        let sessionOffset = 0;
 
-            const sessionCard =
-                document.querySelector(".session-card");
+        if (sessionCard) {
+            const compactSessionTop =
+                sessionCard.getBoundingClientRect().top;
 
-            const expandedSessionTop = sessionCard
-                ? sessionCard.getBoundingClientRect().top
-                : 0;
+            sessionOffset =
+                expandedSessionTop - compactSessionTop;
 
-            document.body.classList.add(
-                "capture-collapsing"
+            sessionCard.style.transform =
+                `translateY(${sessionOffset}px)`;
+            sessionCard.style.position = "relative";
+            sessionCard.style.zIndex = "20";
+            sessionCard.style.willChange = "transform";
+            sessionCard.style.opacity = "1";
+            sessionCard.getBoundingClientRect();
+        }
+
+        risingCards.forEach(({
+            element,
+            distance,
+            delay,
+        }) => {
+            expansionAnimations.push(
+                element.animate(
+                    [
+                        {
+                            opacity: 1,
+                            transform: "translateY(0)",
+                        },
+                        {
+                            opacity: 0,
+                            transform:
+                                `translateY(-${distance}px)`,
+                        },
+                    ],
+                    {
+                        duration: 480,
+                        delay,
+                        fill: "both",
+                        easing:
+                            "cubic-bezier(0.7, 0, 0.84, 0)",
+                    }
+                )
             );
+        });
 
-            document.body.classList.add(
-                "capture-collapsed"
-            );
-
-            requestAnimationFrame(() => {
+        resizeOptionsWindow(
+            true,
+            stateVersion,
+            () => {
                 if (stateVersion !== captureViewVersion) {
                     return;
                 }
 
-                if (sessionCard) {
-                    const compactSessionTop =
-                        sessionCard.getBoundingClientRect().top;
+                cancelExpansionAnimations();
+                clearDetachedCaptureCards();
+                clearSessionExpansionStyles();
 
-                    const sessionOffset =
-                        expandedSessionTop -
-                        compactSessionTop;
-
-                    expansionAnimations.push(
-                        sessionCard.animate(
-                            [
-                                {
-                                    transform:
-                                        `translateY(${sessionOffset}px)`,
-                                },
-                                {
-                                    transform: "translateY(0)",
-                                },
-                            ],
-                            {
-                                duration:
-                                    WINDOW_RESIZE_DURATION,
-                                fill: "both",
-                                easing:
-                                    "cubic-bezier(0.65, 0, 0.35, 1)",
-                            }
-                        )
-                    );
+                document.body.classList.remove(
+                    "capture-collapsing"
+                );
+            },
+            (progress) => {
+                if (!sessionCard) {
+                    return;
                 }
 
-                resizeOptionsWindow(
-                    true,
-                    stateVersion,
-                    () => {
-                        if (
-                            stateVersion !==
-                            captureViewVersion
-                        ) {
-                            return;
-                        }
-
-                        cancelExpansionAnimations();
-
-                        document.body.classList.remove(
-                            "capture-collapsing"
-                        );
-                    }
-                );
-            });
-        }, CARD_FADE_DURATION);
+                sessionCard.style.transform =
+                    `translateY(${sessionOffset * (1 - progress)}px)`;
+            }
+        );
 
         return;
     }
@@ -328,6 +570,30 @@ function setCaptureView(isCapturing) {
     document.body.classList.add("capture-expanding");
     document.body.classList.remove("capture-collapsed");
     document.body.classList.remove("capture-active");
+
+    const expandedContentWindowHeight =
+        getExpandedContentWindowHeight();
+
+    let sessionOffset = 0;
+
+    if (sessionCard) {
+        const expandedSessionTop =
+            sessionCard.getBoundingClientRect().top;
+
+        sessionOffset =
+            compactSessionTop - expandedSessionTop;
+
+        sessionCard.style.transform =
+            `translateY(${sessionOffset}px)`;
+        sessionCard.style.position = "relative";
+        sessionCard.style.zIndex = "20";
+        sessionCard.style.willChange = "transform";
+        sessionCard.style.opacity = "1";
+
+        // Mantiene la tarjeta en su lugar compacto desde
+        // el primer frame, antes de agrandar la ventana.
+        sessionCard.getBoundingClientRect();
+    }
 
     requestAnimationFrame(() => {
         if (stateVersion !== captureViewVersion) {
@@ -387,34 +653,6 @@ function setCaptureView(isCapturing) {
             );
         });
 
-        if (sessionCard) {
-            const expandedSessionTop =
-                sessionCard.getBoundingClientRect().top;
-
-            const sessionOffset =
-                compactSessionTop - expandedSessionTop;
-
-            expansionAnimations.push(
-                sessionCard.animate(
-                    [
-                        {
-                            transform:
-                                `translateY(${sessionOffset}px)`,
-                        },
-                        {
-                            transform: "translateY(0)",
-                        },
-                    ],
-                    {
-                        duration: WINDOW_RESIZE_DURATION,
-                        fill: "both",
-                        easing:
-                            "cubic-bezier(0.22, 1, 0.36, 1)",
-                    }
-                )
-            );
-        }
-
         resizeOptionsWindow(
             false,
             stateVersion,
@@ -423,12 +661,26 @@ function setCaptureView(isCapturing) {
                     return;
                 }
 
+                clearSessionExpansionStyles();
                 cancelExpansionAnimations();
 
                 document.body.classList.remove(
                     "capture-expanding"
                 );
-            }
+
+                document.body.style.removeProperty(
+                    "--session-card-locked-width"
+                );
+            },
+            (progress) => {
+                if (!sessionCard) {
+                    return;
+                }
+
+                sessionCard.style.transform =
+                    `translateY(${sessionOffset * (1 - progress)}px)`;
+            },
+            expandedContentWindowHeight
         );
     });
 }
@@ -501,20 +753,25 @@ function getDisplayStatus(text, color) {
     };
 }
 
-function fitCompactWindowToStatus() {
+function fitWindowToStatus() {
     if (
-        !document.body.classList.contains(
-            "capture-collapsed"
-        ) ||
         document.body.classList.contains(
             "capture-collapsing"
         ) ||
         document.body.classList.contains(
             "capture-expanding"
-        )
+        ) ||
+        !chrome.windows ||
+        !chrome.windows.getCurrent ||
+        !chrome.windows.update
     ) {
         return;
     }
+
+    const isCompact =
+        document.body.classList.contains(
+            "capture-collapsed"
+        );
 
     const stateVersion = captureViewVersion;
 
@@ -528,35 +785,26 @@ function fitCompactWindowToStatus() {
                 stateVersion !== captureViewVersion ||
                 chrome.runtime.lastError ||
                 !currentWindow ||
+                !["normal", "popup"].includes(
+                    currentWindow.type
+                ) ||
                 currentWindow.state !== "normal"
             ) {
                 return;
             }
 
-            const sessionCard =
-                document.querySelector(".session-card");
+            const contentHeight = isCompact
+                ? getCompactContentWindowHeight()
+                : getExpandedContentWindowHeight();
 
-            if (!sessionCard) {
+            if (!contentHeight) {
                 return;
             }
 
-            const bodyStyles =
-                window.getComputedStyle(document.body);
-
-            const verticalPadding =
-                parseFloat(bodyStyles.paddingTop) +
-                parseFloat(bodyStyles.paddingBottom);
-
-            const windowFrameHeight = Math.max(
-                0,
-                window.outerHeight - window.innerHeight
-            );
-
-            const targetHeight = Math.ceil(
-                sessionCard.getBoundingClientRect().height +
-                verticalPadding +
-                windowFrameHeight +
-                2
+            const available = getAvailableScreenBounds();
+            const targetHeight = Math.min(
+                contentHeight,
+                available.height
             );
 
             if (
@@ -583,7 +831,10 @@ function fitCompactWindowToStatus() {
     });
 }
 
-function setConfigurationCollapsed(isCollapsed) {
+function setConfigurationCollapsed(
+    isCollapsed,
+    animate = true
+) {
     const configurationCard =
         document.querySelector(".configuration-card");
 
@@ -593,6 +844,11 @@ function setConfigurationCollapsed(isCollapsed) {
     if (!configurationCard || !configurationToggle) {
         return;
     }
+
+    configurationCard.classList.toggle(
+        "collapse-without-animation",
+        !animate
+    );
 
     configurationCard.classList.toggle(
         "is-collapsed",
@@ -607,6 +863,449 @@ function setConfigurationCollapsed(isCollapsed) {
     configurationToggle.title = isCollapsed
         ? "Abrir configuración"
         : "Colapsar configuración";
+
+    if (!animate) {
+        configurationCard.getBoundingClientRect();
+        configurationCard.classList.remove(
+            "collapse-without-animation"
+        );
+    }
+}
+
+function getAvailableScreenBounds() {
+    const left = Number.isFinite(screen.availLeft)
+        ? screen.availLeft
+        : 0;
+
+    const top = Number.isFinite(screen.availTop)
+        ? screen.availTop
+        : 0;
+
+    return {
+        left,
+        top,
+        width: screen.availWidth,
+        height: screen.availHeight,
+    };
+}
+
+function clampWindowPosition(
+    value,
+    availableStart,
+    windowSize,
+    availableSize
+) {
+    const safeValue = Number.isFinite(value)
+        ? value
+        : availableStart;
+
+    const availableEnd = Math.max(
+        availableStart,
+        availableStart + availableSize - windowSize
+    );
+
+    return Math.min(
+        Math.max(safeValue, availableStart),
+        availableEnd
+    );
+}
+
+function measureUnwrappedTextWidth(
+    element,
+    textOverride
+) {
+    if (!element) {
+        return 0;
+    }
+
+    const styles = window.getComputedStyle(element);
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+        return element.scrollWidth;
+    }
+
+    context.font = [
+        styles.fontStyle,
+        styles.fontVariant,
+        styles.fontWeight,
+        styles.fontSize,
+        styles.fontFamily,
+    ].join(" ");
+
+    const text = String(
+        typeof textOverride === "string"
+            ? textOverride
+            : element.textContent
+    ).trim();
+    const letterSpacing = parseFloat(
+        styles.letterSpacing
+    );
+
+    const extraLetterSpacing = Number.isFinite(
+        letterSpacing
+    )
+        ? Math.max(0, text.length - 1) *
+            letterSpacing
+        : 0;
+
+    return Math.ceil(
+        context.measureText(text).width +
+        extraLetterSpacing
+    );
+}
+
+function getTooltipText(element) {
+    if (element.tagName === "SELECT") {
+        const selectedOption =
+            element.options[element.selectedIndex];
+
+        return selectedOption
+            ? selectedOption.textContent.trim()
+            : "";
+    }
+
+    return element.textContent.trim();
+}
+
+function isTooltipTextTruncated(element, text) {
+    if (element.tagName === "SELECT") {
+        const styles = window.getComputedStyle(element);
+
+        const availableWidth =
+            element.clientWidth -
+            parseFloat(styles.paddingLeft) -
+            parseFloat(styles.paddingRight);
+
+        return (
+            measureUnwrappedTextWidth(element, text) >
+            availableWidth + 1
+        );
+    }
+
+    return element.scrollWidth > element.clientWidth + 1;
+}
+
+function hideDelayedTooltip() {
+    if (delayedTooltipTimer) {
+        clearTimeout(delayedTooltipTimer);
+        delayedTooltipTimer = null;
+    }
+
+    const tooltip =
+        document.getElementById("delayedTooltip");
+
+    if (delayedTooltipAnchor) {
+        delayedTooltipAnchor.removeAttribute(
+            "aria-describedby"
+        );
+    }
+
+    delayedTooltipAnchor = null;
+
+    if (!tooltip) {
+        return;
+    }
+
+    tooltip.classList.remove("is-visible");
+    tooltip.setAttribute("aria-hidden", "true");
+    tooltip.hidden = true;
+}
+
+function showDelayedTooltip(anchor) {
+    const tooltip =
+        document.getElementById("delayedTooltip");
+
+    if (!tooltip || !anchor.isConnected) {
+        return;
+    }
+
+    const text = getTooltipText(anchor);
+
+    if (!text || !isTooltipTextTruncated(anchor, text)) {
+        return;
+    }
+
+    delayedTooltipAnchor = anchor;
+    tooltip.textContent = text;
+    tooltip.hidden = false;
+    tooltip.setAttribute("aria-hidden", "false");
+    tooltip.classList.remove("is-visible");
+    tooltip.style.left = "0px";
+    tooltip.style.top = "0px";
+
+    const anchorRect = anchor.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+
+    const maximumLeft = Math.max(
+        TOOLTIP_VIEWPORT_MARGIN,
+        window.innerWidth -
+            tooltipRect.width -
+            TOOLTIP_VIEWPORT_MARGIN
+    );
+
+    const left = Math.min(
+        Math.max(
+            anchorRect.left,
+            TOOLTIP_VIEWPORT_MARGIN
+        ),
+        maximumLeft
+    );
+
+    let top =
+        anchorRect.bottom + TOOLTIP_ANCHOR_GAP;
+
+    if (
+        top + tooltipRect.height >
+        window.innerHeight - TOOLTIP_VIEWPORT_MARGIN
+    ) {
+        top =
+            anchorRect.top -
+            tooltipRect.height -
+            TOOLTIP_ANCHOR_GAP;
+    }
+
+    top = Math.max(top, TOOLTIP_VIEWPORT_MARGIN);
+
+    tooltip.style.left = `${Math.round(left)}px`;
+    tooltip.style.top = `${Math.round(top)}px`;
+    anchor.setAttribute(
+        "aria-describedby",
+        "delayedTooltip"
+    );
+
+    requestAnimationFrame(() => {
+        if (delayedTooltipAnchor === anchor) {
+            tooltip.classList.add("is-visible");
+        }
+    });
+}
+
+function scheduleDelayedTooltip(anchor) {
+    hideDelayedTooltip();
+
+    const text = getTooltipText(anchor);
+
+    if (!text || !isTooltipTextTruncated(anchor, text)) {
+        return;
+    }
+
+    delayedTooltipTimer = setTimeout(() => {
+        delayedTooltipTimer = null;
+        showDelayedTooltip(anchor);
+    }, DELAYED_TOOLTIP_DELAY);
+}
+
+function initializeDelayedTooltips() {
+    [
+        document.getElementById("sourceTabDropdown"),
+        document.getElementById("targetTabInfo"),
+    ].forEach((anchor) => {
+        if (!anchor) {
+            return;
+        }
+
+        anchor.addEventListener("mouseenter", () => {
+            scheduleDelayedTooltip(anchor);
+        });
+
+        anchor.addEventListener(
+            "mouseleave",
+            hideDelayedTooltip
+        );
+
+        anchor.addEventListener(
+            "mousedown",
+            hideDelayedTooltip
+        );
+    });
+
+    window.addEventListener("blur", hideDelayedTooltip);
+    window.addEventListener("resize", hideDelayedTooltip);
+
+    document.addEventListener(
+        "scroll",
+        hideDelayedTooltip,
+        true
+    );
+}
+
+function getSweetSpotWindowWidth(windowFrameWidth) {
+    const sessionTitleGroup = document.querySelector(
+        ".session-card .card-heading > div"
+    );
+
+    const status =
+        document.getElementById("serverStatus");
+
+    const vadCopy = document.querySelector(
+        ".configuration-card .toggle-copy"
+    );
+
+    const vadToggle =
+        document.getElementById("useVadCheckbox");
+
+    if (
+        !sessionTitleGroup ||
+        !status ||
+        !vadCopy ||
+        !vadToggle
+    ) {
+        return Math.ceil(
+            OPTIONS_FALLBACK_CONTENT_WIDTH +
+            COMPACT_BODY_HORIZONTAL_PADDING +
+            windowFrameWidth
+        );
+    }
+
+    const sessionTitleWidth = Math.max(
+        ...Array.from(sessionTitleGroup.children)
+            .map((element) =>
+                measureUnwrappedTextWidth(element)
+            )
+    );
+
+    const sessionRowWidth =
+        sessionTitleWidth +
+        status.getBoundingClientRect().width +
+        COMPACT_SESSION_HEADING_GAP;
+
+    const vadCopyWidth = Math.max(
+        ...Array.from(vadCopy.children)
+            .map((element) =>
+                measureUnwrappedTextWidth(element)
+            )
+    );
+
+    const vadRowWidth =
+        vadCopyWidth +
+        vadToggle.getBoundingClientRect().width +
+        COMPACT_TOGGLE_ROW_GAP;
+
+    return Math.ceil(
+        Math.max(sessionRowWidth, vadRowWidth) +
+        COMPACT_CARD_HORIZONTAL_INSET +
+        COMPACT_BODY_HORIZONTAL_PADDING +
+        windowFrameWidth +
+        SWEET_SPOT_WIDTH_BUFFER
+    );
+}
+
+function fitOptionsWindowToContent() {
+    if (
+        document.body.classList.contains(
+            "capture-collapsed"
+        ) ||
+        document.body.classList.contains(
+            "capture-collapsing"
+        ) ||
+        document.body.classList.contains(
+            "capture-expanding"
+        ) ||
+        !chrome.windows ||
+        !chrome.windows.getCurrent ||
+        !chrome.windows.update
+    ) {
+        return;
+    }
+
+    const stateVersion = captureViewVersion;
+
+    chrome.windows.getCurrent((currentWindow) => {
+        if (
+            stateVersion !== captureViewVersion ||
+            chrome.runtime.lastError ||
+            !currentWindow ||
+            !["normal", "popup"].includes(
+                currentWindow.type
+            ) ||
+            currentWindow.state !== "normal"
+        ) {
+            return;
+        }
+
+        const available = getAvailableScreenBounds();
+
+        const windowFrameWidth = Math.max(
+            0,
+            currentWindow.width - window.innerWidth
+        );
+
+        const idealWidth = getSweetSpotWindowWidth(
+            windowFrameWidth
+        );
+
+        const targetWidth = Math.min(
+            idealWidth,
+            available.width
+        );
+
+        const targetLeft = clampWindowPosition(
+            currentWindow.left,
+            available.left,
+            targetWidth,
+            available.width
+        );
+
+        chrome.windows.update(
+            currentWindow.id,
+            {
+                width: targetWidth,
+                left: targetLeft,
+            },
+            () => {
+                if (
+                    stateVersion !== captureViewVersion ||
+                    chrome.runtime.lastError
+                ) {
+                    return;
+                }
+
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        if (
+                            stateVersion !==
+                            captureViewVersion
+                        ) {
+                            return;
+                        }
+
+                        window.scrollTo(0, 0);
+
+                        const idealHeight =
+                            getExpandedContentWindowHeight();
+
+                        if (!idealHeight) {
+                            return;
+                        }
+
+                        const targetHeight = Math.min(
+                            idealHeight,
+                            available.height
+                        );
+
+                        const targetTop =
+                            clampWindowPosition(
+                                currentWindow.top,
+                                available.top,
+                                targetHeight,
+                                available.height
+                            );
+
+                        chrome.windows.update(
+                            currentWindow.id,
+                            {
+                                height: targetHeight,
+                                top: targetTop,
+                            },
+                            () => void chrome.runtime.lastError
+                        );
+                    });
+                });
+            }
+        );
+    });
 }
 
 function resizeWindowForConfiguration(
@@ -664,7 +1363,7 @@ function resizeWindowForConfiguration(
             return;
         }
 
-        const targetHeight = Math.max(
+        const idealHeight = Math.max(
             260,
             Math.round(
                 currentWindow.height +
@@ -672,6 +1371,13 @@ function resizeWindowForConfiguration(
                     ? -heightDifference
                     : heightDifference)
             )
+        );
+
+        const available = getAvailableScreenBounds();
+
+        const targetHeight = Math.min(
+            idealHeight,
+            available.height
         );
 
         animateWindowSize(
@@ -710,7 +1416,7 @@ function setServerStatus(text, color = "gray") {
         dotEl.className = "status-dot " + color;
     }
 
-    fitCompactWindowToStatus();
+    fitWindowToStatus();
 }
 
 function getSelectedBackend() {
@@ -719,6 +1425,96 @@ function getSelectedBackend() {
     );
 
     return selected ? selected.value : "rocm";
+}
+
+function setBackendIndicator(
+    backend,
+    animate = true
+) {
+    const segmentedOptions =
+        document.querySelector(".segmented-options");
+
+    if (!segmentedOptions) {
+        return;
+    }
+
+    const validBackends = [
+        "cpu",
+        "cuda",
+        "vulkan",
+        "rocm",
+    ];
+
+    if (!validBackends.includes(backend)) {
+        backend = "rocm";
+    }
+
+    if (backendIndicatorTextTimer) {
+        clearTimeout(backendIndicatorTextTimer);
+        backendIndicatorTextTimer = null;
+    }
+
+    if (backendIndicatorMotionTimer) {
+        clearTimeout(backendIndicatorMotionTimer);
+        backendIndicatorMotionTimer = null;
+    }
+
+    const updateActiveLabel = () => {
+        segmentedOptions
+            .querySelectorAll(".radio-option")
+            .forEach((option) => {
+                const input = option.querySelector(
+                    'input[name="backend"]'
+                );
+
+                option.classList.toggle(
+                    "indicator-text-active",
+                    Boolean(
+                        input &&
+                        input.value === backend
+                    )
+                );
+            });
+    };
+
+    if (!animate) {
+        segmentedOptions.classList.remove(
+            "indicator-ready",
+            "indicator-moving"
+        );
+
+        segmentedOptions.dataset.backend = backend;
+        updateActiveLabel();
+        return;
+    }
+
+    segmentedOptions.classList.add(
+        "indicator-ready",
+        "indicator-moving"
+    );
+
+    segmentedOptions
+        .querySelectorAll(".indicator-text-active")
+        .forEach((option) => {
+            option.classList.remove(
+                "indicator-text-active"
+            );
+        });
+
+    segmentedOptions.dataset.backend = backend;
+
+    backendIndicatorTextTimer = setTimeout(() => {
+        updateActiveLabel();
+        backendIndicatorTextTimer = null;
+    }, BACKEND_INDICATOR_TEXT_DELAY);
+
+    backendIndicatorMotionTimer = setTimeout(() => {
+        segmentedOptions.classList.remove(
+            "indicator-moving"
+        );
+
+        backendIndicatorMotionTimer = null;
+    }, BACKEND_INDICATOR_MOTION_DURATION);
 }
 
 function startBackend(backend) {
@@ -1164,6 +1960,8 @@ document.addEventListener(
                 "configurationToggle"
             );
 
+        initializeDelayedTooltips();
+
         chrome.storage.local.get(
             ["configurationCollapsed"],
             ({ configurationCollapsed }) => {
@@ -1171,14 +1969,15 @@ document.addEventListener(
                     Boolean(configurationCollapsed);
 
                 setConfigurationCollapsed(
-                    isCollapsed
+                    isCollapsed,
+                    false
                 );
 
-                if (isCollapsed) {
+                requestAnimationFrame(() => {
                     requestAnimationFrame(() => {
-                        resizeWindowForConfiguration(true);
+                        fitOptionsWindowToContent();
                     });
-                }
+                });
             }
         );
 
@@ -1202,6 +2001,7 @@ document.addEventListener(
                         "is-collapsed"
                     );
 
+                beginConfigurationResizeMask();
                 setConfigurationCollapsed(isCollapsed);
 
                 configurationToggle.dataset.animating =
@@ -1210,8 +2010,7 @@ document.addEventListener(
                 resizeWindowForConfiguration(
                     isCollapsed,
                     () => {
-                        configurationToggle.dataset.animating =
-                            "false";
+                        endConfigurationResizeMask();
                     }
                 );
 
@@ -1380,6 +2179,28 @@ document.addEventListener(
                         true;
                 }
 
+                setBackendIndicator(
+                    selectedBackendRadio
+                        ? selectedBackend
+                        : "rocm",
+                    false
+                );
+
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        const segmentedOptions =
+                            document.querySelector(
+                                ".segmented-options"
+                            );
+
+                        if (segmentedOptions) {
+                            segmentedOptions.classList.add(
+                                "indicator-ready"
+                            );
+                        }
+                    });
+                });
+
                 populateColumnOrderOptions(
                     taskDropdown.value,
                     columnOrderDropdown
@@ -1393,6 +2214,10 @@ document.addEventListener(
                     "change",
                     () => {
                         if (radio.checked) {
+                            setBackendIndicator(
+                                radio.value
+                            );
+
                             chrome.storage.local.set({
                                 selectedBackend:
                                     radio.value,

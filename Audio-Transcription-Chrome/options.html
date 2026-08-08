@@ -15,19 +15,52 @@
             <div class="brand">
                 <img class="brand-icon" src="./icon128.png" alt="Whisker">
                 <div class="brand-copy">
-                    <h1>Whisker</h1>
+                    <div class="brand-title-row">
+                        <h1>Whisker</h1>
+                        <svg
+                            class="brand-whisker-wave"
+                            viewBox="0 0 100 35"
+                            aria-hidden="true"
+                            focusable="false"
+                        >
+                            <path
+                                d="M0 20 H14 L19 17 L24 26 L29 11 L33 31 L39 0 L44 35 L49 14 L54 27 L60 6 L65 32 L71 15 L76 25 L82 17 L87 23 L92 20 H100"
+                                vector-effect="non-scaling-stroke"
+                            ></path>
+                        </svg>
+                    </div>
                     <p>Live Audio Transcription</p>
                 </div>
             </div>
         </header>
 
-        <section class="settings-card source-card" aria-labelledby="sourceHeading">
+        <section class="settings-card session-card" aria-labelledby="sessionHeading">
             <div class="card-heading">
                 <div>
-                    <p class="section-kicker">Entrada</p>
-                    <h2 id="sourceHeading">Fuente de audio</h2>
+                    <h2 id="sessionHeading">Control de captura</h2>
+                </div>
+                <div id="serverStatus" class="status-pill">
+                    <span id="statusDot" class="status-dot"></span>
+                    Estado: Desconectado
                 </div>
             </div>
+
+            <div id="targetTabInfo" class="info-bar session-source">
+                Vas a capturar: ninguna pestaña seleccionada
+            </div>
+
+            <div class="button-container">
+                <button class="button button-primary" id="startCapture" type="button">
+                    Iniciar captura
+                </button>
+                <button class="button button-secondary" id="stopCapture" type="button" disabled>
+                    Detener
+                </button>
+            </div>
+        </section>
+
+        <section class="settings-card source-card" aria-labelledby="sourceHeading">
+            <h2 id="sourceHeading" class="source-title">Entrada</h2>
 
             <div class="field-row source-field">
                 <label for="sourceTabDropdown">Fuente a capturar</label>
@@ -46,7 +79,6 @@
         <section class="settings-card configuration-card" aria-labelledby="configurationHeading">
             <div class="card-heading">
                 <div>
-                    <p class="section-kicker">Ajustes</p>
                     <h2 id="configurationHeading">Configuración</h2>
                 </div>
                 <button
@@ -112,7 +144,7 @@
 
                 <fieldset class="field-group backend-field">
                     <legend>Backend</legend>
-                    <div class="segmented-options">
+                    <div class="segmented-options" data-backend="rocm">
                         <label class="radio-option">
                             <input type="radio" name="backend" value="cpu">
                             <span>CPU</span>
@@ -125,7 +157,7 @@
                             <input type="radio" name="backend" value="vulkan">
                             <span>Vulkan</span>
                         </label>
-                        <label class="radio-option">
+                        <label class="radio-option indicator-text-active">
                             <input type="radio" name="backend" value="rocm" checked>
                             <span>ROCm</span>
                         </label>
@@ -143,33 +175,15 @@
                 </div>
             </div>
         </section>
-
-        <section class="settings-card session-card" aria-labelledby="sessionHeading">
-            <div class="card-heading">
-                <div>
-                    <p class="section-kicker">Sesión</p>
-                    <h2 id="sessionHeading">Control de captura</h2>
-                </div>
-                <div id="serverStatus" class="status-pill">
-                    <span id="statusDot" class="status-dot"></span>
-                    Estado: Desconectado
-                </div>
-            </div>
-
-            <div id="targetTabInfo" class="info-bar session-source">
-                Vas a capturar: ninguna pestaña seleccionada
-            </div>
-
-            <div class="button-container">
-                <button class="button button-primary" id="startCapture" type="button">
-                    Iniciar captura
-                </button>
-                <button class="button button-secondary" id="stopCapture" type="button" disabled>
-                    Detener
-                </button>
-            </div>
-        </section>
     </main>
+
+    <div
+        id="delayedTooltip"
+        class="delayed-tooltip"
+        role="tooltip"
+        aria-hidden="true"
+        hidden
+    ></div>
 
     <script src="options.js"></script>
 </body>

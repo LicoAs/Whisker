@@ -30,6 +30,8 @@ html {
 }
 
 body {
+    --expanded-body-padding-top: 36px;
+    --expanded-body-padding-bottom: 36px;
     min-width: 680px;
     min-height: 100vh;
     margin: 0;
@@ -42,6 +44,10 @@ body {
     font-size: 14px;
     line-height: 1.5;
     transition: padding 320ms ease-in-out;
+}
+
+body.configuration-resizing {
+    overflow-y: hidden;
 }
 
 button,
@@ -66,7 +72,6 @@ input[type="radio"] {
 .app-shell {
     width: min(100%, 760px);
     margin: 0 auto;
-    transition: width 320ms ease-in-out;
 }
 
 /* Header */
@@ -87,6 +92,12 @@ input[type="radio"] {
     object-fit: contain;
 }
 
+.brand-title-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
 .brand-copy h1 {
     margin: 0;
     font-size: 24px;
@@ -104,9 +115,30 @@ input[type="radio"] {
     text-transform: uppercase;
 }
 
+.brand-whisker-wave {
+    width: 100px;
+    height: 35px;
+    flex: 0 0 auto;
+    overflow: visible;
+    color: var(--accent-bright);
+    filter:
+        drop-shadow(0 0 2px rgba(24, 224, 194, 0.72))
+        drop-shadow(0 0 5px rgba(17, 197, 167, 0.28));
+}
+
+.brand-whisker-wave path {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: miter;
+    stroke-miterlimit: 2.5;
+}
+
 /* Cards */
 
 .settings-card {
+    min-width: 0;
     margin-bottom: 16px;
     padding: 22px;
     overflow: hidden;
@@ -114,6 +146,10 @@ input[type="radio"] {
     border: 1px solid var(--border);
     border-radius: 16px;
     box-shadow: var(--shadow);
+}
+
+.app-shell > .settings-card:last-child {
+    margin-bottom: 0;
 }
 
 .card-heading {
@@ -125,20 +161,13 @@ input[type="radio"] {
     margin-bottom: 18px;
 }
 
-.section-kicker {
-    margin: 0 0 3px;
-    color: var(--accent);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-}
-
 h2 {
     margin: 0;
-    font-size: 17px;
+    color: var(--accent);
+    font-family: "Segoe UI Variable Display", "Segoe UI", var(--font-ui);
+    font-size: 14px;
     font-weight: 650;
-    letter-spacing: -0.01em;
+    letter-spacing: 0.015em;
 }
 
 /* Collapsible configuration */
@@ -194,6 +223,17 @@ h2 {
     overflow: hidden;
 }
 
+.configuration-content .field-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.configuration-content .field-row select {
+    width: 100%;
+    max-width: 100%;
+}
+
 .configuration-card.is-collapsed .card-heading {
     margin-bottom: 0;
 }
@@ -209,6 +249,12 @@ h2 {
     transform: rotate(180deg);
 }
 
+.configuration-card.collapse-without-animation .card-heading,
+.configuration-card.collapse-without-animation .configuration-content,
+.configuration-card.collapse-without-animation .toggle-chevron {
+    transition: none !important;
+}
+
 /* Fields */
 
 .settings-list {
@@ -218,6 +264,7 @@ h2 {
 .field-row,
 .toggle-row,
 .field-group {
+    min-width: 0;
     min-height: 62px;
     margin: 0;
     padding: 13px 0;
@@ -252,13 +299,30 @@ legend {
 .field-actions {
     display: flex;
     flex: 1;
+    min-width: 0;
     justify-content: flex-end;
     gap: 10px;
 }
 
 .source-field {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
     padding: 0;
     border: 0;
+}
+
+.source-card {
+    padding: 18px 22px;
+}
+
+.source-title {
+    margin-bottom: 10px;
+}
+
+.source-field .field-actions {
+    width: 100%;
 }
 
 select {
@@ -295,6 +359,11 @@ select:disabled {
 
 .source-field select {
     width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .icon-button {
@@ -315,6 +384,9 @@ select:disabled {
 }
 
 .info-bar {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
     margin-top: 14px;
     padding: 11px 13px;
     overflow: hidden;
@@ -325,6 +397,33 @@ select:disabled {
     font-size: 12px;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.delayed-tooltip {
+    position: fixed;
+    z-index: 1000;
+    width: max-content;
+    max-width: min(420px, calc(100vw - 24px));
+    padding: 9px 11px;
+    color: var(--ink);
+    background: rgba(22, 27, 34, 0.98);
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34);
+    font-size: 12px;
+    line-height: 1.45;
+    opacity: 0;
+    overflow-wrap: anywhere;
+    pointer-events: none;
+    transform: translateY(-3px);
+    transition:
+        opacity 140ms ease,
+        transform 140ms ease;
+}
+
+.delayed-tooltip.is-visible {
+    opacity: 1;
+    transform: translateY(0);
 }
 
 /* Backend segmented control */
@@ -343,16 +442,102 @@ select:disabled {
 }
 
 .segmented-options {
+    --backend-offset: calc(300% + 15px);
+    --indicator-glow-scale-x: 0.84;
+    --indicator-glow-scale-y: 0.76;
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 5px;
     padding: 4px;
+    isolation: isolate;
+    position: relative;
     background: #11161d;
     border: 1px solid var(--border);
     border-radius: 10px;
+    overflow: hidden;
+}
+
+.segmented-options::before,
+.segmented-options::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    width: calc((100% - 23px) / 4);
+    border-radius: 7px;
+    pointer-events: none;
+    transform: translateX(var(--backend-offset));
+    transform-origin: center;
+    will-change: transform;
+}
+
+.segmented-options::before {
+    z-index: 1;
+    top: 4px;
+    bottom: 4px;
+    background: linear-gradient(
+        135deg,
+        rgba(24, 224, 194, 0.96),
+        rgba(17, 197, 167, 0.88)
+    );
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.20),
+        0 0 12px rgba(17, 197, 167, 0.24),
+        0 3px 10px rgba(6, 27, 23, 0.30);
+}
+
+.segmented-options::after {
+    z-index: 0;
+    top: 8px;
+    bottom: 8px;
+    background: rgba(24, 224, 194, 0.66);
+    filter: blur(8px);
+    opacity: 0.58;
+    transform:
+        translateX(var(--backend-offset))
+        scale(
+            var(--indicator-glow-scale-x),
+            var(--indicator-glow-scale-y)
+        );
+}
+
+.segmented-options.indicator-ready::before {
+    transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.segmented-options.indicator-ready::after {
+    transition:
+        transform 300ms cubic-bezier(0.22, 1, 0.36, 1),
+        opacity 180ms ease;
+}
+
+.segmented-options.indicator-moving {
+    --indicator-glow-scale-x: 1.42;
+    --indicator-glow-scale-y: 1.06;
+}
+
+.segmented-options.indicator-moving::after {
+    opacity: 0.82;
+}
+
+.segmented-options[data-backend="cpu"] {
+    --backend-offset: 0;
+}
+
+.segmented-options[data-backend="cuda"] {
+    --backend-offset: calc(100% + 5px);
+}
+
+.segmented-options[data-backend="vulkan"] {
+    --backend-offset: calc(200% + 10px);
+}
+
+.segmented-options[data-backend="rocm"] {
+    --backend-offset: calc(300% + 15px);
 }
 
 .radio-option {
+    position: relative;
+    z-index: 2;
     cursor: pointer;
 }
 
@@ -369,9 +554,13 @@ select:disabled {
     min-width: 64px;
     padding: 7px 10px;
     color: var(--ink-soft);
+    background: transparent;
     border: 1px solid transparent;
     border-radius: 7px;
     text-align: center;
+    transition:
+        color 200ms ease,
+        background-color 150ms ease;
 }
 
 .radio-option:hover span {
@@ -380,9 +569,16 @@ select:disabled {
 }
 
 .radio-option input:checked + span {
+    background: transparent;
+}
+
+.radio-option.indicator-text-active span {
     color: #061b17;
-    background: var(--accent);
     font-weight: 700;
+}
+
+.radio-option.indicator-text-active:hover span {
+    background: transparent;
 }
 
 .radio-option input:disabled + span {
@@ -396,6 +592,7 @@ select:disabled {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    min-width: 0;
 }
 
 .toggle-copy span {
@@ -565,9 +762,20 @@ body.capture-active .configuration-card {
     transform: translateY(-8px) scale(0.985);
 }
 
+body.capture-active .session-card,
+body.capture-collapsing .session-card,
+body.capture-collapsed .session-card,
+body.capture-expanding .session-card {
+    width: var(--session-card-locked-width);
+    max-width: 100%;
+    margin-right: auto;
+    margin-left: auto;
+}
+
 body.capture-collapsed {
     min-height: 0;
-    padding: 24px 36px;
+    padding-top: 24px;
+    padding-bottom: 24px;
 }
 
 body.capture-collapsed .app-header,
@@ -593,12 +801,24 @@ body.capture-collapsing .session-card {
     will-change: transform;
 }
 
+body.capture-collapsing .app-header,
+body.capture-collapsing .source-card,
+body.capture-collapsing .configuration-card {
+    transition: none;
+}
+
 body.capture-expanding .app-header,
 body.capture-expanding .source-card,
 body.capture-expanding .configuration-card,
 body.capture-expanding .session-card {
     transition: none;
     will-change: transform, opacity;
+}
+
+body.capture-expanding .session-card {
+    position: relative;
+    z-index: 20;
+    opacity: 1;
 }
 
 @media (max-width: 720px) {
@@ -608,6 +828,8 @@ body.capture-expanding .session-card {
     }
 
     body {
+        --expanded-body-padding-top: 22px;
+        --expanded-body-padding-bottom: 22px;
         padding: 22px 16px;
     }
 
