@@ -41,9 +41,6 @@
                 </div>
             </div>
 
-            <div id="targetTabInfo" class="info-bar">
-                Vas a capturar: ninguna pestaña seleccionada
-            </div>
         </section>
 
         <section class="settings-card configuration-card" aria-labelledby="configurationHeading">
@@ -52,9 +49,23 @@
                     <p class="section-kicker">Ajustes</p>
                     <h2 id="configurationHeading">Configuración</h2>
                 </div>
+                <button
+                    id="configurationToggle"
+                    class="collapse-toggle"
+                    type="button"
+                    aria-expanded="true"
+                    aria-controls="configurationContent"
+                    title="Colapsar configuración"
+                >
+                    <svg class="toggle-chevron" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M6 15l6-6 6 6"></path>
+                    </svg>
+                </button>
             </div>
 
-            <div class="settings-list">
+            <div id="configurationContent" class="configuration-content">
+                <div class="configuration-content-inner">
+                    <div class="settings-list">
                 <div class="field-row">
                     <label for="taskDropdown">Modo</label>
                     <select id="taskDropdown">
@@ -121,12 +132,14 @@
                     </div>
                 </fieldset>
 
-                <div class="toggle-row">
-                    <div class="toggle-copy">
-                        <label for="useVadCheckbox">Detección de voz</label>
-                        <span>Ignora fragmentos sin voz antes de transcribir.</span>
+                        <div class="toggle-row">
+                            <div class="toggle-copy">
+                                <label for="useVadCheckbox">Detección de voz</label>
+                                <span>Ignora fragmentos sin voz antes de transcribir.</span>
+                            </div>
+                            <input type="checkbox" id="useVadCheckbox">
+                        </div>
                     </div>
-                    <input type="checkbox" id="useVadCheckbox">
                 </div>
             </div>
         </section>
@@ -139,8 +152,12 @@
                 </div>
                 <div id="serverStatus" class="status-pill">
                     <span id="statusDot" class="status-dot"></span>
-                    Estado: desconectado
+                    Estado: Desconectado
                 </div>
+            </div>
+
+            <div id="targetTabInfo" class="info-bar session-source">
+                Vas a capturar: ninguna pestaña seleccionada
             </div>
 
             <div class="button-container">
